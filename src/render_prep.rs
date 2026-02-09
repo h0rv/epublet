@@ -601,7 +601,19 @@ impl Styler {
     where
         F: FnMut(StyledEventOrRun),
     {
-        let mut reader = Reader::from_str(html);
+        self.style_chapter_bytes_with(html.as_bytes(), &mut on_item)
+    }
+
+    /// Style a chapter from XHTML bytes and stream each item to a callback.
+    pub fn style_chapter_bytes_with<F>(
+        &self,
+        html_bytes: &[u8],
+        mut on_item: F,
+    ) -> Result<(), RenderPrepError>
+    where
+        F: FnMut(StyledEventOrRun),
+    {
+        let mut reader = Reader::from_reader(html_bytes);
         reader.config_mut().trim_text(false);
         let mut buf = Vec::new();
         let mut stack: Vec<ElementCtx> = Vec::new();
@@ -1204,7 +1216,7 @@ impl RenderPrep {
         &self,
         book: &mut EpubBook<R>,
         index: usize,
-    ) -> Result<(String, String), RenderPrepError> {
+    ) -> Result<(String, Vec<u8>), RenderPrepError> {
         let chapter = book.chapter(index).map_err(|e| {
             RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
                 .with_chapter_index(index)
@@ -1233,16 +1245,7 @@ impl RenderPrep {
                 self.opts.memory.max_entry_bytes,
             ));
         }
-        let html = String::from_utf8(bytes).map_err(|_| {
-            RenderPrepError::new_with_phase(
-                ErrorPhase::Parse,
-                "BOOK_CHAPTER_NOT_UTF8",
-                format!("Chapter content is not valid UTF-8: {}", href),
-            )
-            .with_path(href.clone())
-            .with_chapter_index(index)
-        })?;
-        Ok((href, html))
+        Ok((href, bytes))
     }
 
     fn apply_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
@@ -1250,9 +1253,9 @@ impl RenderPrep {
         book: &mut EpubBook<R>,
         chapter_index: usize,
         chapter_href: &str,
-        html: &str,
+        html: &[u8],
     ) -> Result<(), RenderPrepError> {
-        let links = parse_stylesheet_links(chapter_href, html);
+        let links = parse_stylesheet_links_bytes(chapter_href, html);
         self.styler.clear_stylesheets();
         let css_limit = min(
             self.opts.style.limits.max_css_bytes,
@@ -1346,7 +1349,7 @@ impl RenderPrep {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
-        self.styler.style_chapter_with(&html, |item| {
+        self.styler.style_chapter_bytes_with(&html, |item| {
             let (item, _) = resolve_item_with_font(font_resolver, item);
             on_item(item);
         })
@@ -1365,7 +1368,7 @@ impl RenderPrep {
         let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
         self.apply_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         let font_resolver = &self.font_resolver;
-        self.styler.style_chapter_with(&html, |item| {
+        self.styler.style_chapter_bytes_with(&html, |item| {
             let (item, trace) = resolve_item_with_font(font_resolver, item);
             on_item(item, trace);
         })
@@ -1672,8 +1675,12 @@ fn normalize_path(path: &str) -> String {
 }
 
 pub(crate) fn parse_stylesheet_links(chapter_href: &str, html: &str) -> Vec<String> {
+    parse_stylesheet_links_bytes(chapter_href, html.as_bytes())
+}
+
+pub(crate) fn parse_stylesheet_links_bytes(chapter_href: &str, html_bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
-    let mut reader = Reader::from_str(html);
+    let mut reader = Reader::from_reader(html_bytes);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
 
