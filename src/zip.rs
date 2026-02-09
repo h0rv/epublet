@@ -425,6 +425,28 @@ impl<F: Read + Seek> StreamingZip<F> {
         entry: &CdEntry,
         writer: &mut W,
     ) -> Result<usize, ZipError> {
+        let mut input_buf = alloc::vec![0u8; 8 * 1024];
+        let mut output_buf = alloc::vec![0u8; 8 * 1024];
+        self.read_file_to_writer_with_scratch(entry, writer, &mut input_buf, &mut output_buf)
+    }
+
+    /// Stream a file's decompressed bytes into an arbitrary writer using caller-provided scratch buffers.
+    ///
+    /// This API is intended for embedded use cases where callers want strict control over
+    /// allocation and stack usage. `input_buf` and `output_buf` must both be non-empty.
+    ///
+    /// For `METHOD_STORED`, only `input_buf` is used for chunked copying.
+    /// For `METHOD_DEFLATED`, both buffers are used.
+    pub fn read_file_to_writer_with_scratch<W: Write>(
+        &mut self,
+        entry: &CdEntry,
+        writer: &mut W,
+        input_buf: &mut [u8],
+        output_buf: &mut [u8],
+    ) -> Result<usize, ZipError> {
+        if input_buf.is_empty() || output_buf.is_empty() {
+            return Err(ZipError::BufferTooSmall);
+        }
         if let Some(limits) = self.limits {
             if entry.uncompressed_size as usize > limits.max_file_read_size {
                 return Err(ZipError::FileTooLarge);
@@ -442,19 +464,18 @@ impl<F: Read + Seek> StreamingZip<F> {
         match entry.method {
             METHOD_STORED => {
                 let mut remaining = entry.compressed_size as usize;
-                let mut chunk = [0u8; 8 * 1024];
                 let mut hasher = crc32fast::Hasher::new();
                 let mut written = 0usize;
 
                 while remaining > 0 {
-                    let take = core::cmp::min(remaining, chunk.len());
+                    let take = core::cmp::min(remaining, input_buf.len());
                     self.file
-                        .read_exact(&mut chunk[..take])
+                        .read_exact(&mut input_buf[..take])
                         .map_err(|_| ZipError::IoError)?;
                     writer
-                        .write_all(&chunk[..take])
+                        .write_all(&input_buf[..take])
                         .map_err(|_| ZipError::IoError)?;
-                    hasher.update(&chunk[..take]);
+                    hasher.update(&input_buf[..take]);
                     written += take;
                     remaining -= take;
                 }
@@ -469,8 +490,6 @@ impl<F: Read + Seek> StreamingZip<F> {
                     miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
                 );
                 let mut compressed_remaining = entry.compressed_size as usize;
-                let mut input_buf = [0u8; 8 * 1024];
-                let mut output_buf = [0u8; 8 * 1024];
                 let mut pending = &[][..];
                 let mut written = 0usize;
                 let mut hasher = crc32fast::Hasher::new();
@@ -491,10 +510,7 @@ impl<F: Read + Seek> StreamingZip<F> {
                         MZFlush::None
                     };
                     let result = miniz_oxide::inflate::stream::inflate(
-                        &mut state,
-                        pending,
-                        &mut output_buf,
-                        flush,
+                        &mut state, pending, output_buf, flush,
                     );
                     let consumed = result.bytes_consumed;
                     let produced = result.bytes_written;
@@ -940,6 +956,41 @@ mod tests {
         let mut buf = [0u8; 64];
         let n = zip.read_file(&entry, &mut buf).unwrap();
         assert_eq!(&buf[..n], content);
+    }
+
+    #[test]
+    fn test_read_file_to_writer_with_scratch_streams_stored_entry() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let entry = zip.get_entry("mimetype").unwrap().clone();
+
+        let mut out = Vec::new();
+        let mut input = [0u8; 16];
+        let mut output = [0u8; 16];
+        let n = zip
+            .read_file_to_writer_with_scratch(&entry, &mut out, &mut input, &mut output)
+            .expect("streaming with scratch should succeed");
+        assert_eq!(n, content.len());
+        assert_eq!(out, content);
+    }
+
+    #[test]
+    fn test_read_file_to_writer_with_scratch_rejects_empty_buffers() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).unwrap();
+        let entry = zip.get_entry("mimetype").unwrap().clone();
+
+        let mut out = Vec::new();
+        let mut input = [];
+        let mut output = [0u8; 16];
+        let err = zip
+            .read_file_to_writer_with_scratch(&entry, &mut out, &mut input, &mut output)
+            .expect_err("empty input buffer must fail");
+        assert!(matches!(err, ZipError::BufferTooSmall));
     }
 
     #[test]
