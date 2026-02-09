@@ -412,6 +412,38 @@ pub fn tokenize_html(html: &str) -> Result<Vec<Token>, TokenizeError> {
     Ok(tokens)
 }
 
+/// Limits for bounded tokenization to prevent unbounded Vec growth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenizeLimits {
+    /// Maximum number of tokens to emit before returning an error.
+    pub max_tokens: usize,
+    /// Maximum nesting depth for element stack.
+    pub max_nesting: usize,
+    /// Maximum text node size in bytes before truncation.
+    pub max_text_bytes: usize,
+}
+
+impl Default for TokenizeLimits {
+    fn default() -> Self {
+        Self {
+            max_tokens: 100_000,
+            max_nesting: 256,
+            max_text_bytes: 64 * 1024,
+        }
+    }
+}
+
+impl TokenizeLimits {
+    /// Create limits suitable for embedded environments.
+    pub fn embedded() -> Self {
+        Self {
+            max_tokens: 10_000,
+            max_nesting: 64,
+            max_text_bytes: 8 * 1024,
+        }
+    }
+}
+
 /// Convert XHTML string into a streamed token sequence.
 ///
 /// This callback-oriented API keeps ownership of each token with the caller,
@@ -424,6 +456,594 @@ where
         on_token(token);
     }
     Ok(())
+}
+
+/// Convert XHTML string into a token stream with bounded limits.
+///
+/// Enforces `max_tokens` limit to prevent unbounded Vec growth on malicious
+/// or extremely large inputs. Returns an error if limits are exceeded.
+///
+/// # Allocation behavior
+/// - Allocates token Vec with capacity hints
+/// - Returns error instead of unbounded growth
+/// - Stack usage is bounded by `max_nesting`
+pub fn tokenize_html_limited(
+    html: &str,
+    limits: TokenizeLimits,
+) -> Result<Vec<Token>, TokenizeError> {
+    let mut reader = Reader::from_str(html);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut buf = Vec::new();
+    let mut tokens = Vec::with_capacity(limits.max_tokens.min(1024));
+
+    // Stack to track nested elements for proper closing
+    let mut element_stack: Vec<ElementType> = Vec::with_capacity(limits.max_nesting.min(64));
+    // Track if we're inside a tag that should be skipped (script, style, head)
+    let mut skip_depth: usize = 0;
+    // Track if we need a paragraph break after current block element
+    let mut pending_paragraph_break: bool = false;
+    // Track if we need a heading close after text content
+    let mut pending_heading_close: Option<u8> = None;
+
+    let mut token_count: usize = 0;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Check if we should skip this element and its children
+                if should_skip_element(&name) {
+                    skip_depth += 1;
+                    continue;
+                }
+
+                // If skipping, don't process anything
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Check nesting limit
+                if element_stack.len() >= limits.max_nesting {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Nesting depth exceeds max_nesting ({})",
+                        limits.max_nesting
+                    )));
+                }
+
+                // Flush any pending paragraph break from previous block
+                if pending_paragraph_break && !tokens.is_empty() {
+                    if token_count >= limits.max_tokens {
+                        return Err(TokenizeError::InvalidStructure(format!(
+                            "Token count exceeds max_tokens ({}",
+                            limits.max_tokens
+                        )));
+                    }
+                    tokens.push(Token::ParagraphBreak);
+                    token_count += 1;
+                    pending_paragraph_break = false;
+                }
+
+                // Flush any pending heading close
+                if let Some(level) = pending_heading_close.take() {
+                    if token_count >= limits.max_tokens {
+                        return Err(TokenizeError::InvalidStructure(format!(
+                            "Token count exceeds max_tokens ({}",
+                            limits.max_tokens
+                        )));
+                    }
+                    tokens.push(Token::Heading(level));
+                    token_count += 1;
+                    pending_paragraph_break = true;
+                }
+
+                match name.as_str() {
+                    "p" | "div" => {
+                        element_stack.push(ElementType::Paragraph);
+                    }
+                    "span" => {
+                        element_stack.push(ElementType::Span);
+                    }
+                    h if h.starts_with('h') && h.len() == 2 => {
+                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
+                            if (1..=6).contains(&level) {
+                                element_stack.push(ElementType::Heading(level as u8));
+                                pending_heading_close = Some(level as u8);
+                            }
+                        }
+                    }
+                    "em" | "i" => {
+                        element_stack.push(ElementType::Emphasis);
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Emphasis(true));
+                        token_count += 1;
+                    }
+                    "strong" | "b" => {
+                        element_stack.push(ElementType::Strong);
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Strong(true));
+                        token_count += 1;
+                    }
+                    "ul" => {
+                        element_stack.push(ElementType::UnorderedList);
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::ListStart(false));
+                        token_count += 1;
+                    }
+                    "ol" => {
+                        element_stack.push(ElementType::OrderedList);
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::ListStart(true));
+                        token_count += 1;
+                    }
+                    "li" => {
+                        element_stack.push(ElementType::ListItem);
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::ListItemStart);
+                        token_count += 1;
+                    }
+                    "a" => {
+                        if let Some(href) = get_attribute(&e, &reader, "href") {
+                            element_stack.push(ElementType::Link);
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::LinkStart(href));
+                            token_count += 1;
+                        } else {
+                            // No href — treat as generic container
+                            element_stack.push(ElementType::Generic);
+                        }
+                    }
+                    "img" => {
+                        // <img> as a start tag (non-self-closing)
+                        if let Some(src) = get_attribute(&e, &reader, "src") {
+                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::Image { src, alt });
+                            token_count += 1;
+                        }
+                        element_stack.push(ElementType::Generic);
+                    }
+                    _ => {
+                        // Unknown element, treat as generic container
+                        element_stack.push(ElementType::Generic);
+                    }
+                }
+            }
+            Ok(Event::Text(e)) => {
+                // Skip text if we're inside a script/style/head block
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                let text = e
+                    .decode()
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
+                    .to_string();
+
+                // Normalize whitespace: collapse multiple spaces/newlines
+                let normalized = normalize_whitespace_limited(&text, limits.max_text_bytes);
+
+                if !normalized.is_empty() {
+                    // Flush any pending heading close
+                    if let Some(level) = pending_heading_close.take() {
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Heading(level));
+                        token_count += 1;
+                    }
+                    if token_count >= limits.max_tokens {
+                        return Err(TokenizeError::InvalidStructure(format!(
+                            "Token count exceeds max_tokens ({}",
+                            limits.max_tokens
+                        )));
+                    }
+                    tokens.push(Token::Text(normalized));
+                    token_count += 1;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Check if we're ending a skip element
+                if should_skip_element(&name) {
+                    skip_depth = skip_depth.saturating_sub(1);
+                    continue;
+                }
+
+                // If skipping, don't process end tags
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Pop the element from stack and emit appropriate close token
+                if let Some(element) = element_stack.pop() {
+                    match element {
+                        ElementType::Paragraph => {
+                            pending_paragraph_break = true;
+                        }
+                        ElementType::Heading(_level) => {
+                            // Heading already emitted on start, just mark for paragraph break
+                            pending_paragraph_break = true;
+                            // Clear any pending close since we already handled it
+                            pending_heading_close = None;
+                        }
+                        ElementType::Emphasis => {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::Emphasis(false));
+                            token_count += 1;
+                        }
+                        ElementType::Strong => {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::Strong(false));
+                            token_count += 1;
+                        }
+                        ElementType::UnorderedList | ElementType::OrderedList => {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::ListEnd);
+                            token_count += 1;
+                        }
+                        ElementType::ListItem => {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::ListItemEnd);
+                            token_count += 1;
+                        }
+                        ElementType::Link => {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::LinkEnd);
+                            token_count += 1;
+                        }
+                        ElementType::Span | ElementType::Generic => {
+                            // No tokens needed for these
+                        }
+                    }
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = decode_name(e.name().as_ref(), &reader)?;
+
+                // Skip empty elements inside script/style blocks
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                // Flush any pending paragraph break
+                if pending_paragraph_break && !tokens.is_empty() {
+                    if token_count >= limits.max_tokens {
+                        return Err(TokenizeError::InvalidStructure(format!(
+                            "Token count exceeds max_tokens ({}",
+                            limits.max_tokens
+                        )));
+                    }
+                    tokens.push(Token::ParagraphBreak);
+                    token_count += 1;
+                    pending_paragraph_break = false;
+                }
+
+                // Flush any pending heading close
+                if let Some(level) = pending_heading_close.take() {
+                    if token_count >= limits.max_tokens {
+                        return Err(TokenizeError::InvalidStructure(format!(
+                            "Token count exceeds max_tokens ({}",
+                            limits.max_tokens
+                        )));
+                    }
+                    tokens.push(Token::Heading(level));
+                    token_count += 1;
+                    pending_paragraph_break = true;
+                }
+
+                match name.as_str() {
+                    "br" => {
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::LineBreak);
+                        token_count += 1;
+                    }
+                    "p" | "div" => {
+                        // Empty paragraph still creates a paragraph break
+                        pending_paragraph_break = true;
+                    }
+                    h if h.starts_with('h') && h.len() == 2 => {
+                        if let Some(level) = h.chars().nth(1).and_then(|c| c.to_digit(10)) {
+                            if (1..=6).contains(&level) {
+                                // Empty heading - just emit the heading token
+                                if token_count >= limits.max_tokens {
+                                    return Err(TokenizeError::InvalidStructure(format!(
+                                        "Token count exceeds max_tokens ({}",
+                                        limits.max_tokens
+                                    )));
+                                }
+                                tokens.push(Token::Heading(level as u8));
+                                token_count += 1;
+                                pending_paragraph_break = true;
+                            }
+                        }
+                    }
+                    "img" => {
+                        if let Some(src) = get_attribute(&e, &reader, "src") {
+                            let alt = get_attribute(&e, &reader, "alt").unwrap_or_default();
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::Image { src, alt });
+                            token_count += 1;
+                        }
+                        // No src → skip
+                    }
+                    _ => {
+                        // Other empty elements are ignored
+                    }
+                }
+            }
+            Ok(Event::CData(e)) => {
+                // CDATA content is treated as raw text
+                if skip_depth == 0 {
+                    let text = reader
+                        .decoder()
+                        .decode(&e)
+                        .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?
+                        .to_string();
+
+                    let normalized = normalize_whitespace_limited(&text, limits.max_text_bytes);
+                    if !normalized.is_empty() {
+                        if let Some(level) = pending_heading_close.take() {
+                            if token_count >= limits.max_tokens {
+                                return Err(TokenizeError::InvalidStructure(format!(
+                                    "Token count exceeds max_tokens ({}",
+                                    limits.max_tokens
+                                )));
+                            }
+                            tokens.push(Token::Heading(level));
+                            token_count += 1;
+                        }
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Text(normalized));
+                        token_count += 1;
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(e)) => {
+                // Entity references: &amp; &lt; &gt; &quot; &apos; &#8220; etc.
+                if skip_depth > 0 {
+                    continue;
+                }
+
+                let entity_name = e
+                    .decode()
+                    .map_err(|e| TokenizeError::ParseError(format!("Decode error: {:?}", e)))?;
+                // Reconstruct the entity string and unescape it
+                let entity_str = format!("&{};", entity_name);
+                let resolved = unescape(&entity_str)
+                    .map_err(|e| TokenizeError::ParseError(format!("Unescape error: {:?}", e)))?
+                    .to_string();
+
+                if !resolved.is_empty() {
+                    // Flush any pending heading close
+                    if let Some(level) = pending_heading_close.take() {
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Heading(level));
+                        token_count += 1;
+                    }
+                    // Append to the last Text token if possible, otherwise create new one
+                    if let Some(Token::Text(ref mut last_text)) = tokens.last_mut() {
+                        if last_text.len() + resolved.len() <= limits.max_text_bytes {
+                            last_text.push_str(&resolved);
+                        }
+                    } else {
+                        if token_count >= limits.max_tokens {
+                            return Err(TokenizeError::InvalidStructure(format!(
+                                "Token count exceeds max_tokens ({}",
+                                limits.max_tokens
+                            )));
+                        }
+                        tokens.push(Token::Text(resolved));
+                        token_count += 1;
+                    }
+                }
+            }
+            Ok(Event::Comment(_)) => {
+                // Comments are ignored
+            }
+            Ok(Event::Decl(_)) => {
+                // XML declaration is ignored
+            }
+            Ok(Event::PI(_)) => {
+                // Processing instructions are ignored
+            }
+            Ok(Event::DocType(_)) => {
+                // DOCTYPE is ignored
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(TokenizeError::ParseError(format!("XML error: {:?}", e)));
+            }
+        }
+        buf.clear();
+    }
+
+    // Close any unclosed formatting tags
+    while let Some(element) = element_stack.pop() {
+        match element {
+            ElementType::Emphasis => {
+                if token_count >= limits.max_tokens {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Token count exceeds max_tokens ({}",
+                        limits.max_tokens
+                    )));
+                }
+                tokens.push(Token::Emphasis(false));
+                token_count += 1;
+            }
+            ElementType::Strong => {
+                if token_count >= limits.max_tokens {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Token count exceeds max_tokens ({}",
+                        limits.max_tokens
+                    )));
+                }
+                tokens.push(Token::Strong(false));
+                token_count += 1;
+            }
+            ElementType::UnorderedList | ElementType::OrderedList => {
+                if token_count >= limits.max_tokens {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Token count exceeds max_tokens ({}",
+                        limits.max_tokens
+                    )));
+                }
+                tokens.push(Token::ListEnd);
+                token_count += 1;
+            }
+            ElementType::ListItem => {
+                if token_count >= limits.max_tokens {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Token count exceeds max_tokens ({}",
+                        limits.max_tokens
+                    )));
+                }
+                tokens.push(Token::ListItemEnd);
+                token_count += 1;
+            }
+            ElementType::Link => {
+                if token_count >= limits.max_tokens {
+                    return Err(TokenizeError::InvalidStructure(format!(
+                        "Token count exceeds max_tokens ({}",
+                        limits.max_tokens
+                    )));
+                }
+                tokens.push(Token::LinkEnd);
+                token_count += 1;
+            }
+            ElementType::Paragraph | ElementType::Heading(_) => {
+                // These already handled via pending_paragraph_break
+            }
+            _ => {}
+        }
+    }
+
+    // Flush any pending heading close
+    if let Some(level) = pending_heading_close {
+        if token_count >= limits.max_tokens {
+            return Err(TokenizeError::InvalidStructure(format!(
+                "Token count exceeds max_tokens ({}",
+                limits.max_tokens
+            )));
+        }
+        tokens.push(Token::Heading(level));
+    }
+
+    Ok(tokens)
+}
+
+/// Normalize whitespace with a byte limit.
+fn normalize_whitespace_limited(text: &str, max_bytes: usize) -> String {
+    let mut result = String::with_capacity(text.len().min(max_bytes));
+    let mut prev_was_space = true; // Start true to trim leading whitespace
+
+    for ch in text.chars() {
+        if result.len() >= max_bytes {
+            break;
+        }
+        if ch.is_whitespace() {
+            if !prev_was_space {
+                result.push(' ');
+                prev_was_space = true;
+            }
+        } else {
+            result.push(ch);
+            prev_was_space = false;
+        }
+    }
+
+    // Trim trailing space if present
+    if result.ends_with(' ') {
+        result.pop();
+    }
+
+    result
 }
 
 /// Types of elements we track in the stack

@@ -25,6 +25,14 @@ fmt-check:
 lint:
     cargo clippy --all-features -- -D warnings
 
+# Lint no_std (no default features)
+lint-no-std:
+    cargo clippy --no-default-features -- -D warnings
+
+# Lint embedded mode (alloc only, no std)
+lint-embedded:
+    cargo clippy --no-default-features --features alloc -- -D warnings
+
 # Check all features
 check:
     cargo check --all-features
@@ -62,6 +70,14 @@ test-ignored:
 # Run tests with output
 test-verbose:
     cargo test --all-features -- --nocapture
+
+# Run allocation count tests
+test-alloc:
+    cargo test --all-features --test allocation_tests -- --nocapture
+
+# Run embedded mode tests with tiny budgets
+test-embedded:
+    cargo test --all-features --test embedded_mode_tests -- --nocapture
 
 # Verify benchmark fixture corpus integrity
 bench-fixtures-check:

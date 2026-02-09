@@ -471,11 +471,21 @@ impl EpubBook<File> {
 
 impl<R: Read + Seek> EpubBook<R> {
     /// Open an EPUB from any `Read + Seek` source and parse core structures.
+    ///
+    /// # Allocation behavior
+    /// - Bounded by `ZipLimits` in options
+    /// - Allocates central directory cache (~4KB fixed)
+    /// - Worst-case: ~10KB for metadata + navigation
     pub fn from_reader(reader: R) -> Result<Self, EpubError> {
         Self::from_reader_with_options(reader, EpubBookOptions::default())
     }
 
     /// Open an EPUB from any `Read + Seek` source and parse core structures.
+    ///
+    /// # Allocation behavior
+    /// - Bounded by `ZipLimits` in options
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Configurable via `options.zip_limits`
     pub fn from_reader_with_options(
         reader: R,
         options: EpubBookOptions,
@@ -484,6 +494,11 @@ impl<R: Read + Seek> EpubBook<R> {
     }
 
     /// Open an EPUB from any `Read + Seek` source with compatibility open configuration.
+    ///
+    /// # Allocation behavior
+    /// - Bounded by `ZipLimits` in config.options
+    /// - Supports lazy navigation loading to defer allocation
+    /// - Caller buffer required: No
     pub fn from_reader_with_config(reader: R, config: OpenConfig) -> Result<Self, EpubError> {
         let options = config.options;
         let mut zip =
@@ -641,9 +656,17 @@ impl<R: Read + Seek> EpubBook<R> {
         self.chapter(index)
     }
 
-    /// Read a resource by OPF-relative href.
+    /// Read a resource by OPF-relative href into a new `Vec<u8>`.
     ///
     /// Fragment suffixes (e.g. `chapter.xhtml#p3`) are ignored.
+    ///
+    /// # Allocation behavior
+    /// - **Allocates**: Returns new `Vec<u8>`
+    /// - **Non-embedded-fast-path**: Use `read_resource_into` for embedded
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Unbounded (depends on file size)
+    ///
+    /// For bounded allocation, use `read_resource_into_with_limit`.
     pub fn read_resource(&mut self, href: &str) -> Result<Vec<u8>, EpubError> {
         let mut out = Vec::new();
         self.read_resource_into(href, &mut out)?;
@@ -653,6 +676,11 @@ impl<R: Read + Seek> EpubBook<R> {
     /// Stream a resource by OPF-relative href into a writer.
     ///
     /// Fragment suffixes (e.g. `chapter.xhtml#p3`) are ignored.
+    ///
+    /// # Allocation behavior
+    /// - **Zero hidden allocations**: Uses bounded internal buffers
+    /// - Caller buffer required: Yes (writer handles output)
+    /// - **Preferred for embedded**: Streaming API
     pub fn read_resource_into<W: Write>(
         &mut self,
         href: &str,
@@ -694,6 +722,14 @@ impl<R: Read + Seek> EpubBook<R> {
     }
 
     /// Read a spine chapter as UTF-8 HTML/XHTML text by index.
+    ///
+    /// # Allocation behavior
+    /// - **Allocates**: Returns new `String`
+    /// - **Non-embedded-fast-path**: Use `chapter_html_into` for embedded
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Depends on chapter size
+    ///
+    /// For bounded allocation, use `chapter_html_into_with_limit`.
     pub fn chapter_html(&mut self, index: usize) -> Result<String, EpubError> {
         let mut out = String::new();
         self.chapter_html_into(index, &mut out)?;
@@ -701,6 +737,11 @@ impl<R: Read + Seek> EpubBook<R> {
     }
 
     /// Read a spine chapter as UTF-8 HTML/XHTML text into caller-provided output.
+    ///
+    /// # Allocation behavior
+    /// - **Zero hidden allocations**: Reuses caller's String buffer
+    /// - Caller buffer required: Yes
+    /// - **Preferred for embedded**: Buffer reuse API
     pub fn chapter_html_into(&mut self, index: usize, out: &mut String) -> Result<(), EpubError> {
         self.chapter_html_into_with_limit(index, usize::MAX, out)
     }
@@ -796,11 +837,22 @@ impl<R: Read + Seek> EpubBook<R> {
     }
 
     /// Style chapter content into an event/run stream with default options.
+    ///
+    /// # Allocation behavior
+    /// - **Allocates**: Returns `StyledChapter` with internal Vec
+    /// - **Non-embedded-fast-path**: Use `chapter_events` for streaming
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Depends on `MemoryBudget` in options
     pub fn chapter_styled_runs(&mut self, index: usize) -> Result<StyledChapter, EpubError> {
         self.chapter_styled_runs_with_options(index, RenderPrepOptions::default())
     }
 
     /// Style chapter content into an event/run stream with explicit options.
+    ///
+    /// # Allocation behavior
+    /// - **Bounded by limits**: Respects `MemoryBudget` in options
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Configurable via `options.memory`
     pub fn chapter_styled_runs_with_options(
         &mut self,
         index: usize,
@@ -816,6 +868,12 @@ impl<R: Read + Seek> EpubBook<R> {
     }
 
     /// Stream chapter style events/runs via callback with bounded item emission.
+    ///
+    /// # Allocation behavior
+    /// - **Zero hidden allocations**: Uses bounded internal buffers
+    /// - Caller buffer required: No (callback receives items)
+    /// - **Preferred for embedded**: Streaming API with item caps
+    /// - Worst-case memory: Bounded by `opts.render.memory`
     pub fn chapter_events<F>(
         &mut self,
         index: usize,
@@ -862,6 +920,12 @@ impl<R: Read + Seek> EpubBook<R> {
 
     /// Read a chapter and return plain text extracted from token stream.
     ///
+    /// # Allocation behavior
+    /// - **Allocates**: Returns new `String`
+    /// - **Non-embedded-fast-path**: Use `chapter_text_into` for embedded
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Depends on chapter text size
+    ///
     /// For lower memory usage, prefer `chapter_text_into`/`chapter_text_with_limit`.
     pub fn chapter_text(&mut self, index: usize) -> Result<String, EpubError> {
         let mut out = String::new();
@@ -873,6 +937,11 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// This avoids allocating an intermediate `Vec<Token>` and is intended as
     /// the default API for constrained environments.
+    ///
+    /// # Allocation behavior
+    /// - **Zero hidden allocations**: Reuses caller's String buffer
+    /// - Caller buffer required: Yes
+    /// - **Preferred for embedded**: Primary text extraction API
     pub fn chapter_text_into(&mut self, index: usize, out: &mut String) -> Result<(), EpubError> {
         self.chapter_text_into_with_limit(index, usize::MAX, out)
     }
@@ -911,8 +980,14 @@ impl<R: Read + Seek> EpubBook<R> {
 
     /// Tokenize spine item content by index.
     ///
-    /// This API allocates a full token vector. Prefer `chapter_text_into` for
-    /// low-memory extraction paths.
+    /// # Allocation behavior
+    /// - **Allocates**: Returns `Vec<Token>` (unbounded growth possible)
+    /// - **Non-embedded-fast-path**: Use `chapter_text_into` for bounded paths
+    /// - Caller buffer required: No
+    /// - Worst-case memory: Unbounded (depends on chapter complexity)
+    ///
+    /// Prefer `chapter_text_into` for low-memory extraction paths.
+    /// For bounded tokenization, use `tokenize_html_limited` from the tokenizer module.
     pub fn tokenize_spine_item(&mut self, index: usize) -> Result<Vec<Token>, EpubError> {
         let chapter = self.chapter(index)?;
         let bytes = self.read_resource(&chapter.href)?;

@@ -45,6 +45,16 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: all-features
+            command: just lint
+          - label: no-default-features
+            command: just lint-no-std
+          - label: embedded-mode
+            command: just lint-embedded
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -64,12 +74,12 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-stable-clippy-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-stable-clippy-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-stable-clippy-
+            ${{ runner.os }}-cargo-stable-clippy-${{ matrix.label }}-
 
-      - name: Lint (all targets, all features)
-        run: just lint
+      - name: Lint (${{ matrix.label }})
+        run: ${{ matrix.command }}
 
   check:
     name: Check (${{ matrix.label }})
@@ -145,6 +155,36 @@ jobs:
 
       - name: Run ignored tests
         run: just test-ignored
+
+      - name: Run allocation tests
+        run: just test-alloc
+
+  test-embedded:
+    name: Embedded Mode Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install just
+        uses: taiki-e/install-action@just
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-test-embedded-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stable-test-embedded-
+
+      - name: Run embedded mode tests with tiny budgets
+        run: just test-embedded
 
   docs:
     name: Docs

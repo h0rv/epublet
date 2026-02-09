@@ -1221,7 +1221,7 @@ impl RenderPrep {
             RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
                 .with_chapter_index(index)
         })?;
-        let href = chapter.href.clone();
+        let href = chapter.href;
         let bytes = book.read_resource(&href).map_err(|e| {
             RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_HTML", e.to_string())
                 .with_path(href.clone())

@@ -7,9 +7,25 @@
 //!
 //! - `std` (default) -- enables streaming ZIP reader and file I/O
 //! - `layout` -- text layout engine for pagination
+//!
+//! # Allocation Behavior
+//!
+//! This crate uses an alloc-bounded design with explicit limits on all
+//! expensive entrypoints. The primary APIs require caller-provided buffers
+//! or scratch space (`*_with_scratch`, `*_into`). Convenience APIs that
+//! allocate (`read_resource() -> Vec<u8>`) are available only with the `std`
+//! feature and are clearly marked as non-embedded-fast-path.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
+#![deny(clippy::large_enum_variant, clippy::large_stack_arrays, clippy::redundant_clone)]
+#![warn(
+    clippy::box_collection,
+    clippy::needless_collect,
+    clippy::map_clone,
+    clippy::implicit_clone,
+    clippy::inefficient_to_string
+)]
 
 extern crate alloc;
 
@@ -62,7 +78,7 @@ pub use render_prep::{
     StyledRun, Styler, StylesheetSource,
 };
 pub use spine::Spine;
-pub use tokenizer::{Token, TokenizeError};
+pub use tokenizer::{Token, TokenizeError, TokenizeLimits, tokenize_html_limited};
 #[cfg(feature = "std")]
 pub use validate::{
     validate_epub_file, validate_epub_file_with_options, validate_epub_reader,
