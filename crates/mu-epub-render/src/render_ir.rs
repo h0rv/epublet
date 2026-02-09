@@ -64,6 +64,11 @@ impl RenderPage {
         self.commands.extend(self.chrome_commands.iter().cloned());
         self.commands.extend(self.overlay_commands.iter().cloned());
     }
+
+    /// Backward-compatible accessor alias for page metadata.
+    pub fn page_meta(&self) -> &PageMeta {
+        &self.metrics
+    }
 }
 
 /// Structured page annotation.
@@ -93,6 +98,9 @@ pub struct PageMetrics {
     /// Book progress in range `[0.0, 1.0]`, when known.
     pub progress_book: Option<f32>,
 }
+
+/// Backward-compatible alias for page-level metadata.
+pub type PageMeta = PageMetrics;
 
 /// Stable pagination profile id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

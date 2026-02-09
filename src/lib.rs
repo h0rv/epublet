@@ -48,14 +48,16 @@ pub use book::{
     EpubSummary, Locator, ReadingPosition, ReadingSession, ResolvedLocation, ValidationMode,
 };
 pub use css::{CssStyle, Stylesheet};
-pub use error::{EpubError, ZipError, ZipErrorKind};
+pub use error::{
+    EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext, ZipError, ZipErrorKind,
+};
 pub use metadata::EpubMetadata;
 pub use navigation::Navigation;
 #[cfg(feature = "std")]
 pub use render_prep::{
     BlockRole, ChapterStylesheets, ComputedTextStyle, EmbeddedFontFace, EmbeddedFontStyle,
     FontFallbackPolicy, FontLimits, FontPolicy, FontResolutionTrace, FontResolver, LayoutHints,
-    PreparedChapter, RenderPrep, RenderPrepError, RenderPrepOptions, RenderPrepTrace,
+    MemoryBudget, PreparedChapter, RenderPrep, RenderPrepError, RenderPrepOptions, RenderPrepTrace,
     ResolvedFontFace, StyleConfig, StyleLimits, StyledChapter, StyledEvent, StyledEventOrRun,
     StyledRun, Styler, StylesheetSource,
 };

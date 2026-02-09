@@ -12,6 +12,7 @@ implemented. See [docs/spec-compliance.md](docs/spec-compliance.md) and
 [docs/compliance.md](docs/compliance.md) for current coverage details.
 Dataset bootstrap and corpus validation flow is documented in
 [docs/datasets.md](docs/datasets.md).
+Embedded-focused usage patterns are documented in [docs/embedded.md](docs/embedded.md).
 
 Note: ZIP64 archives are currently not supported and are rejected explicitly.
 

@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use mu_epub::EpubBook;
+use mu_epub::{EpubBook, MemoryBudget, RenderPrepOptions};
 use mu_epub_render::{
     CancelToken, OverlayComposer, OverlayContent, OverlayItem, OverlaySize, OverlaySlot,
-    PageChromeConfig, RenderDiagnostic, RenderEngine, RenderEngineOptions, RenderPage,
+    PageChromeConfig, PaginationProfileId, RenderCacheStore, RenderConfig, RenderDiagnostic,
+    RenderEngine, RenderEngineError, RenderEngineOptions, RenderPage,
 };
 
 fn fixture_path() -> PathBuf {
@@ -194,4 +195,126 @@ fn diagnostic_sink_receives_reflow_timing() {
     assert!(diagnostics
         .iter()
         .any(|d| matches!(d, RenderDiagnostic::ReflowTimeMs(_))));
+}
+
+#[derive(Default)]
+struct CacheSpy {
+    loads: Mutex<usize>,
+    stores: Mutex<usize>,
+    cached_pages: Mutex<Option<Vec<RenderPage>>>,
+}
+
+impl CacheSpy {
+    fn load_count(&self) -> usize {
+        *self.loads.lock().expect("load lock")
+    }
+
+    fn store_count(&self) -> usize {
+        *self.stores.lock().expect("store lock")
+    }
+}
+
+impl RenderCacheStore for CacheSpy {
+    fn load_chapter_pages(
+        &self,
+        _profile: PaginationProfileId,
+        _chapter_index: usize,
+    ) -> Option<Vec<RenderPage>> {
+        let mut loads = self.loads.lock().expect("load lock");
+        *loads += 1;
+        self.cached_pages.lock().expect("pages lock").clone()
+    }
+
+    fn store_chapter_pages(
+        &self,
+        _profile: PaginationProfileId,
+        _chapter_index: usize,
+        pages: &[RenderPage],
+    ) {
+        let mut stores = self.stores.lock().expect("store lock");
+        *stores += 1;
+        *self.cached_pages.lock().expect("pages lock") = Some(pages.to_vec());
+    }
+}
+
+#[test]
+fn prepare_chapter_with_config_stores_pages_in_cache() {
+    let engine = build_engine();
+    let mut book = open_fixture_book();
+    let cache = CacheSpy::default();
+    let (chapter, _) = chapter_with_min_pages(&engine, &mut book, 1)
+        .expect("fixture should contain at least one renderable chapter");
+
+    let pages = engine
+        .prepare_chapter_with_config_collect(
+            &mut book,
+            chapter,
+            RenderConfig::default().with_cache(&cache),
+        )
+        .expect("prepare with cache should pass");
+
+    assert!(!pages.is_empty());
+    assert_eq!(cache.load_count(), 1);
+    assert_eq!(cache.store_count(), 1);
+    let cached = cache
+        .cached_pages
+        .lock()
+        .expect("pages lock")
+        .clone()
+        .expect("cache should store pages");
+    assert_eq!(cached, pages);
+}
+
+#[test]
+fn prepare_chapter_with_config_uses_cache_hit() {
+    let engine = build_engine();
+    let mut book = open_fixture_book();
+    let (chapter, expected) = chapter_with_min_pages(&engine, &mut book, 1)
+        .expect("fixture should contain at least one renderable chapter");
+
+    let cache = CacheSpy::default();
+    *cache.cached_pages.lock().expect("pages lock") = Some(expected.clone());
+    let mut book_from_cache = open_fixture_book();
+
+    let actual = engine
+        .prepare_chapter_with_config_collect(
+            &mut book_from_cache,
+            chapter,
+            RenderConfig::default().with_cache(&cache),
+        )
+        .expect("cached prepare should pass");
+
+    assert_eq!(actual, expected);
+    assert_eq!(cache.load_count(), 1);
+    assert_eq!(cache.store_count(), 0);
+}
+
+#[test]
+fn prepare_chapter_collect_enforces_max_pages_in_memory() {
+    let baseline_engine = build_engine();
+    let mut baseline_book = open_fixture_book();
+    let (chapter, _) = chapter_with_min_pages(&baseline_engine, &mut baseline_book, 2)
+        .expect("fixture should contain a chapter with at least 2 pages");
+
+    let mut opts = RenderEngineOptions::for_display(420, 180);
+    opts.prep = RenderPrepOptions {
+        memory: MemoryBudget {
+            max_pages_in_memory: 1,
+            ..MemoryBudget::default()
+        },
+        ..RenderPrepOptions::default()
+    };
+    let engine = RenderEngine::new(opts);
+    let mut book = open_fixture_book();
+
+    let err = engine
+        .prepare_chapter(&mut book, chapter)
+        .expect_err("collect path should enforce max_pages_in_memory");
+    assert!(matches!(
+        err,
+        RenderEngineError::LimitExceeded {
+            kind: "max_pages_in_memory",
+            ..
+        }
+    ));
 }

@@ -6,15 +6,16 @@ mod render_layout;
 
 pub use mu_epub::BlockRole;
 pub use render_engine::{
-    CancelToken, NeverCancel, RenderDiagnostic, RenderEngine, RenderEngineError,
-    RenderEngineOptions, RenderPageIter, RenderPageStreamIter,
+    CancelToken, LayoutSession, NeverCancel, PageRange, RenderCacheStore, RenderConfig,
+    RenderDiagnostic, RenderEngine, RenderEngineError, RenderEngineOptions, RenderPageIter,
+    RenderPageStreamIter,
 };
 pub use render_ir::{
     DitherMode, DrawCommand, FloatSupport, GrayscaleMode, HangingPunctuationConfig,
     HyphenationConfig, HyphenationMode, JustificationConfig, JustifyMode, ObjectLayoutConfig,
     OverlayComposer, OverlayContent, OverlayItem, OverlayRect, OverlaySize, OverlaySlot,
     PageAnnotation, PageChromeCommand, PageChromeConfig, PageChromeKind, PageChromeTextStyle,
-    PageMetrics, PaginationProfileId, RectCommand, RenderIntent, RenderPage, ResolvedTextStyle,
-    RuleCommand, SvgMode, TextCommand, TypographyConfig, WidowOrphanControl,
+    PageMeta, PageMetrics, PaginationProfileId, RectCommand, RenderIntent, RenderPage,
+    ResolvedTextStyle, RuleCommand, SvgMode, TextCommand, TypographyConfig, WidowOrphanControl,
 };
 pub use render_layout::{LayoutConfig, LayoutEngine, SoftHyphenPolicy};

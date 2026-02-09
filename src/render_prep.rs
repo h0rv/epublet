@@ -6,6 +6,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cmp::min;
 use core::fmt;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -15,7 +16,7 @@ use crate::css::{
     parse_inline_style, parse_stylesheet, CssStyle, FontSize, FontStyle, FontWeight, LineHeight,
     Stylesheet,
 };
-use crate::error::EpubError;
+use crate::error::{EpubError, ErrorLimitContext, ErrorPhase, PhaseError, PhaseErrorContext};
 
 /// Limits for stylesheet parsing and application.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,17 +105,52 @@ pub struct RenderPrepOptions {
     pub fonts: FontLimits,
     /// Final style normalization hints.
     pub layout_hints: LayoutHints,
+    /// Hard memory/resource budgets.
+    pub memory: MemoryBudget,
+}
+
+/// Hard memory/resource budgets for open/parse/style/layout/render paths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MemoryBudget {
+    /// Max bytes allowed for a single heavy entry read (e.g. chapter XHTML).
+    pub max_entry_bytes: usize,
+    /// Max bytes allowed for a stylesheet payload.
+    pub max_css_bytes: usize,
+    /// Max bytes allowed for a navigation document payload.
+    pub max_nav_bytes: usize,
+    /// Max bytes allowed for a single inline `style="..."` attribute payload.
+    pub max_inline_style_bytes: usize,
+    /// Max page objects allowed in memory for eager consumers.
+    pub max_pages_in_memory: usize,
+}
+
+impl Default for MemoryBudget {
+    fn default() -> Self {
+        Self {
+            max_entry_bytes: 4 * 1024 * 1024,
+            max_css_bytes: 512 * 1024,
+            max_nav_bytes: 512 * 1024,
+            max_inline_style_bytes: 16 * 1024,
+            max_pages_in_memory: 128,
+        }
+    }
 }
 
 /// Structured error for style/font preparation operations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderPrepError {
+    /// Processing phase where this error originated.
+    pub phase: ErrorPhase,
     /// Stable machine-readable code.
     pub code: &'static str,
     /// Human-readable message.
     pub message: Box<str>,
     /// Optional archive path context.
     pub path: Option<Box<str>>,
+    /// Optional chapter index context.
+    pub chapter_index: Option<usize>,
+    /// Optional typed actual-vs-limit context.
+    pub limit: Option<Box<ErrorLimitContext>>,
     /// Optional additional context.
     pub context: Option<Box<RenderPrepErrorContext>>,
 }
@@ -137,17 +173,29 @@ pub struct RenderPrepErrorContext {
 }
 
 impl RenderPrepError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    fn new_with_phase(phase: ErrorPhase, code: &'static str, message: impl Into<String>) -> Self {
         Self {
+            phase,
             code,
             message: message.into().into_boxed_str(),
             path: None,
+            chapter_index: None,
+            limit: None,
             context: None,
         }
     }
 
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new_with_phase(ErrorPhase::Style, code, message)
+    }
+
     fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into().into_boxed_str());
+        self
+    }
+
+    fn with_phase(mut self, phase: ErrorPhase) -> Self {
+        self.phase = phase;
         self
     }
 
@@ -156,6 +204,16 @@ impl RenderPrepError {
             .context
             .get_or_insert_with(|| Box::new(RenderPrepErrorContext::default()));
         ctx.source = Some(source.into().into_boxed_str());
+        self
+    }
+
+    fn with_chapter_index(mut self, chapter_index: usize) -> Self {
+        self.chapter_index = Some(chapter_index);
+        self
+    }
+
+    fn with_limit(mut self, kind: &'static str, actual: usize, limit: usize) -> Self {
+        self.limit = Some(Box::new(ErrorLimitContext::new(kind, actual, limit)));
         self
     }
 
@@ -202,9 +260,19 @@ impl RenderPrepError {
 
 impl fmt::Display for RenderPrepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.code, self.message)?;
+        write!(f, "{}:{}: {}", self.phase, self.code, self.message)?;
         if let Some(path) = self.path.as_deref() {
             write!(f, " [path={}]", path)?;
+        }
+        if let Some(chapter_index) = self.chapter_index {
+            write!(f, " [chapter_index={}]", chapter_index)?;
+        }
+        if let Some(limit) = self.limit.as_deref() {
+            write!(
+                f,
+                " [limit_kind={} actual={} limit={}]",
+                limit.kind, limit.actual, limit.limit
+            )?;
         }
         if let Some(ctx) = &self.context {
             if let Some(source) = ctx.source.as_deref() {
@@ -231,6 +299,45 @@ impl fmt::Display for RenderPrepError {
 }
 
 impl std::error::Error for RenderPrepError {}
+
+impl From<RenderPrepError> for PhaseError {
+    fn from(err: RenderPrepError) -> Self {
+        let mut ctx = PhaseErrorContext {
+            path: err.path.clone(),
+            href: err.path.clone(),
+            chapter_index: err.chapter_index,
+            source: None,
+            selector: None,
+            selector_index: None,
+            declaration: None,
+            declaration_index: None,
+            token_offset: None,
+            limit: err.limit.clone(),
+        };
+
+        if let Some(extra) = &err.context {
+            ctx.source = extra.source.clone();
+            ctx.selector = extra.selector.clone();
+            ctx.selector_index = extra.selector_index;
+            ctx.declaration = extra.declaration.clone();
+            ctx.declaration_index = extra.declaration_index;
+            ctx.token_offset = extra.token_offset;
+        }
+
+        PhaseError {
+            phase: err.phase,
+            code: err.code,
+            message: err.message,
+            context: Some(Box::new(ctx)),
+        }
+    }
+}
+
+impl From<RenderPrepError> for EpubError {
+    fn from(err: RenderPrepError) -> Self {
+        EpubError::Phase(err.into())
+    }
+}
 
 /// Source stylesheet payload in chapter cascade order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -386,6 +493,7 @@ impl StyledChapter {
 #[derive(Clone, Debug)]
 pub struct Styler {
     config: StyleConfig,
+    memory: MemoryBudget,
     parsed: Vec<Stylesheet>,
 }
 
@@ -394,8 +502,15 @@ impl Styler {
     pub fn new(config: StyleConfig) -> Self {
         Self {
             config,
+            memory: MemoryBudget::default(),
             parsed: Vec::new(),
         }
+    }
+
+    /// Override hard memory budget used in style paths.
+    pub fn with_memory_budget(mut self, memory: MemoryBudget) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// Parse and load stylesheets in cascade order.
@@ -405,21 +520,25 @@ impl Styler {
     ) -> Result<(), RenderPrepError> {
         self.parsed.clear();
         for source in &sources.sources {
-            if source.css.len() > self.config.limits.max_css_bytes {
+            let css_limit = min(self.config.limits.max_css_bytes, self.memory.max_css_bytes);
+            if source.css.len() > css_limit {
                 let err = RenderPrepError::new(
                     "STYLE_CSS_TOO_LARGE",
                     format!(
                         "Stylesheet exceeds max_css_bytes ({} > {})",
                         source.css.len(),
-                        self.config.limits.max_css_bytes
+                        css_limit
                     ),
                 )
+                .with_phase(ErrorPhase::Style)
+                .with_limit("max_css_bytes", source.css.len(), css_limit)
                 .with_path(source.href.clone())
                 .with_source(source.href.clone());
                 return Err(err);
             }
             let parsed = parse_stylesheet(&source.css).map_err(|e| {
-                RenderPrepError::new(
+                RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
                     "STYLE_PARSE_ERROR",
                     format!("Failed to parse stylesheet: {}", e),
                 )
@@ -434,6 +553,12 @@ impl Styler {
                         parsed.len(),
                         self.config.limits.max_selectors
                     ),
+                )
+                .with_phase(ErrorPhase::Style)
+                .with_limit(
+                    "max_selectors",
+                    parsed.len(),
+                    self.config.limits.max_selectors,
                 )
                 .with_selector(format!("selector_count={}", parsed.len()))
                 .with_selector_index(self.config.limits.max_selectors)
@@ -486,7 +611,8 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let ctx = element_ctx_from_start(&reader, &e)?;
+                    let ctx =
+                        element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
                     emit_start_event(&ctx.tag, &mut on_item);
                     stack.push(ctx);
                 }
@@ -496,7 +622,8 @@ impl Styler {
                         buf.clear();
                         continue;
                     }
-                    let ctx = element_ctx_from_start(&reader, &e)?;
+                    let ctx =
+                        element_ctx_from_start(&reader, &e, self.memory.max_inline_style_bytes)?;
                     emit_start_event(&ctx.tag, &mut on_item);
                     if ctx.tag == "br" {
                         on_item(StyledEventOrRun::Event(StyledEvent::LineBreak));
@@ -531,6 +658,7 @@ impl Styler {
                                 "STYLE_TOKENIZE_ERROR",
                                 format!("Decode error: {:?}", err),
                             )
+                            .with_phase(ErrorPhase::Style)
                             .with_source("text node decode")
                             .with_token_offset(reader_token_offset(&reader))
                         })?
@@ -563,6 +691,7 @@ impl Styler {
                                 "STYLE_TOKENIZE_ERROR",
                                 format!("Decode error: {:?}", err),
                             )
+                            .with_phase(ErrorPhase::Style)
                             .with_source("cdata decode")
                             .with_token_offset(reader_token_offset(&reader))
                         })?
@@ -592,6 +721,7 @@ impl Styler {
                             "STYLE_TOKENIZE_ERROR",
                             format!("Decode error: {:?}", err),
                         )
+                        .with_phase(ErrorPhase::Style)
                         .with_source("entity decode")
                         .with_token_offset(reader_token_offset(&reader))
                     })?;
@@ -602,6 +732,7 @@ impl Styler {
                                 "STYLE_TOKENIZE_ERROR",
                                 format!("Unescape error: {:?}", err),
                             )
+                            .with_phase(ErrorPhase::Style)
                             .with_source("entity unescape")
                             .with_token_offset(reader_token_offset(&reader))
                         })?
@@ -628,6 +759,7 @@ impl Styler {
                         "STYLE_TOKENIZE_ERROR",
                         format!("XML error: {:?}", err),
                     )
+                    .with_phase(ErrorPhase::Style)
                     .with_source("xml tokenizer")
                     .with_token_offset(reader_token_offset(&reader)));
                 }
@@ -839,16 +971,24 @@ impl FontResolver {
                 continue;
             }
             if self.faces.len() >= self.limits.max_faces {
-                return Err(RenderPrepError::new(
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
                     "FONT_FACE_LIMIT",
                     "Too many embedded font faces",
+                )
+                .with_limit(
+                    "max_faces",
+                    self.faces.len() + 1,
+                    self.limits.max_faces,
                 ));
             }
             let bytes = loader(&face.href).map_err(|e| {
-                RenderPrepError::new("FONT_LOAD_ERROR", e.to_string()).with_path(face.href.clone())
+                RenderPrepError::new_with_phase(ErrorPhase::Style, "FONT_LOAD_ERROR", e.to_string())
+                    .with_path(face.href.clone())
             })?;
             if bytes.len() > self.limits.max_bytes_per_font {
-                let err = RenderPrepError::new(
+                let err = RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
                     "FONT_BYTES_PER_FACE_LIMIT",
                     format!(
                         "Font exceeds max_bytes_per_font ({} > {})",
@@ -856,17 +996,28 @@ impl FontResolver {
                         self.limits.max_bytes_per_font
                     ),
                 )
-                .with_path(face.href.clone());
+                .with_path(face.href.clone())
+                .with_limit(
+                    "max_bytes_per_font",
+                    bytes.len(),
+                    self.limits.max_bytes_per_font,
+                );
                 return Err(err);
             }
             total += bytes.len();
             if total > self.limits.max_total_font_bytes {
-                return Err(RenderPrepError::new(
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
                     "FONT_TOTAL_BYTES_LIMIT",
                     format!(
                         "Total font bytes exceed max_total_font_bytes ({} > {})",
                         total, self.limits.max_total_font_bytes
                     ),
+                )
+                .with_limit(
+                    "max_total_font_bytes",
+                    total,
+                    self.limits.max_total_font_bytes,
                 ));
             }
             dedupe_keys.push(dedupe_key);
@@ -1007,7 +1158,7 @@ impl RenderPrepTrace {
 impl RenderPrep {
     /// Create a render-prep engine.
     pub fn new(opts: RenderPrepOptions) -> Self {
-        let styler = Styler::new(opts.style);
+        let styler = Styler::new(opts.style).with_memory_budget(opts.memory);
         let font_resolver = FontResolver::new(FontPolicy::default()).with_limits(opts.fonts);
         Self {
             opts,
@@ -1030,8 +1181,110 @@ impl RenderPrep {
     ) -> Result<Self, RenderPrepError> {
         let fonts = book
             .embedded_fonts_with_options(self.opts.fonts)
-            .map_err(|e| RenderPrepError::new("BOOK_EMBEDDED_FONTS", e.to_string()))?;
+            .map_err(|e| {
+                RenderPrepError::new_with_phase(
+                    ErrorPhase::Parse,
+                    "BOOK_EMBEDDED_FONTS",
+                    e.to_string(),
+                )
+            })?;
         self.with_registered_fonts(fonts, |href| book.read_resource(href))
+    }
+
+    fn load_chapter_html_with_budget<R: std::io::Read + std::io::Seek>(
+        &self,
+        book: &mut EpubBook<R>,
+        index: usize,
+    ) -> Result<(String, String), RenderPrepError> {
+        let chapter = book.chapter(index).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_REF", e.to_string())
+                .with_chapter_index(index)
+        })?;
+        let href = chapter.href.clone();
+        let bytes = book.read_resource(&href).map_err(|e| {
+            RenderPrepError::new_with_phase(ErrorPhase::Parse, "BOOK_CHAPTER_HTML", e.to_string())
+                .with_path(href.clone())
+                .with_chapter_index(index)
+        })?;
+        if bytes.len() > self.opts.memory.max_entry_bytes {
+            return Err(RenderPrepError::new_with_phase(
+                ErrorPhase::Parse,
+                "ENTRY_BYTES_LIMIT",
+                format!(
+                    "Chapter entry exceeds max_entry_bytes ({} > {})",
+                    bytes.len(),
+                    self.opts.memory.max_entry_bytes
+                ),
+            )
+            .with_path(href.clone())
+            .with_chapter_index(index)
+            .with_limit(
+                "max_entry_bytes",
+                bytes.len(),
+                self.opts.memory.max_entry_bytes,
+            ));
+        }
+        let html = String::from_utf8(bytes).map_err(|_| {
+            RenderPrepError::new_with_phase(
+                ErrorPhase::Parse,
+                "BOOK_CHAPTER_NOT_UTF8",
+                format!("Chapter content is not valid UTF-8: {}", href),
+            )
+            .with_path(href.clone())
+            .with_chapter_index(index)
+        })?;
+        Ok((href, html))
+    }
+
+    fn load_chapter_stylesheets_with_budget<R: std::io::Read + std::io::Seek>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        chapter_href: &str,
+        html: &str,
+    ) -> Result<ChapterStylesheets, RenderPrepError> {
+        let links = parse_stylesheet_links(chapter_href, html);
+        let mut sources = Vec::new();
+        let css_limit = min(
+            self.opts.style.limits.max_css_bytes,
+            self.opts.memory.max_css_bytes,
+        );
+        for href in links {
+            let bytes = book.read_resource(&href).map_err(|e| {
+                RenderPrepError::new_with_phase(
+                    ErrorPhase::Parse,
+                    "BOOK_CHAPTER_STYLESHEET_READ",
+                    e.to_string(),
+                )
+                .with_path(href.clone())
+                .with_chapter_index(chapter_index)
+            })?;
+            if bytes.len() > css_limit {
+                return Err(RenderPrepError::new_with_phase(
+                    ErrorPhase::Parse,
+                    "STYLE_CSS_TOO_LARGE",
+                    format!(
+                        "Stylesheet exceeds max_css_bytes ({} > {})",
+                        bytes.len(),
+                        css_limit
+                    ),
+                )
+                .with_path(href.clone())
+                .with_chapter_index(chapter_index)
+                .with_limit("max_css_bytes", bytes.len(), css_limit));
+            }
+            let css = String::from_utf8(bytes).map_err(|_| {
+                RenderPrepError::new_with_phase(
+                    ErrorPhase::Parse,
+                    "STYLE_CSS_NOT_UTF8",
+                    format!("Stylesheet is not UTF-8: {}", href),
+                )
+                .with_path(href.clone())
+                .with_chapter_index(chapter_index)
+            })?;
+            sources.push(StylesheetSource { href, css });
+        }
+        Ok(ChapterStylesheets { sources })
     }
 
     /// Register fonts from any external source with a byte loader callback.
@@ -1079,12 +1332,9 @@ impl RenderPrep {
         index: usize,
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
-        let html = book
-            .chapter_html(index)
-            .map_err(|e| RenderPrepError::new("BOOK_CHAPTER_HTML", e.to_string()))?;
-        let sources = book
-            .chapter_stylesheets_with_options(index, self.opts.style.limits)
-            .map_err(|e| RenderPrepError::new("BOOK_CHAPTER_STYLESHEETS", e.to_string()))?;
+        let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
+        let sources =
+            self.load_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         self.styler.load_stylesheets(&sources)?;
         let font_resolver = &self.font_resolver;
         self.styler.style_chapter_with(&html, |item| {
@@ -1103,12 +1353,9 @@ impl RenderPrep {
         index: usize,
         mut on_item: F,
     ) -> Result<(), RenderPrepError> {
-        let html = book
-            .chapter_html(index)
-            .map_err(|e| RenderPrepError::new("BOOK_CHAPTER_HTML", e.to_string()))?;
-        let sources = book
-            .chapter_stylesheets_with_options(index, self.opts.style.limits)
-            .map_err(|e| RenderPrepError::new("BOOK_CHAPTER_STYLESHEETS", e.to_string()))?;
+        let (chapter_href, html) = self.load_chapter_html_with_budget(book, index)?;
+        let sources =
+            self.load_chapter_stylesheets_with_budget(book, index, &chapter_href, &html)?;
         self.styler.load_stylesheets(&sources)?;
         let font_resolver = &self.font_resolver;
         self.styler.style_chapter_with(&html, |item| {
@@ -1180,9 +1427,13 @@ fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderP
         .decode(raw)
         .map(|v| v.to_string())
         .map_err(|err| {
-            RenderPrepError::new("STYLE_TOKENIZE_ERROR", format!("Decode error: {:?}", err))
-                .with_source("tag name decode")
-                .with_token_offset(reader_token_offset(reader))
+            RenderPrepError::new_with_phase(
+                ErrorPhase::Style,
+                "STYLE_TOKENIZE_ERROR",
+                format!("Decode error: {:?}", err),
+            )
+            .with_source("tag name decode")
+            .with_token_offset(reader_token_offset(reader))
         })
         .map(|tag| {
             tag.rsplit(':')
@@ -1195,6 +1446,7 @@ fn decode_tag_name(reader: &Reader<&[u8]>, raw: &[u8]) -> Result<String, RenderP
 fn element_ctx_from_start(
     reader: &Reader<&[u8]>,
     e: &quick_xml::events::BytesStart<'_>,
+    max_inline_style_bytes: usize,
 ) -> Result<ElementCtx, RenderPrepError> {
     let tag = decode_tag_name(reader, e.name().as_ref())?;
     let mut classes = Vec::new();
@@ -1215,12 +1467,38 @@ fn element_ctx_from_start(
                 .filter(|v| !v.is_empty())
                 .collect();
         } else if key == "style" {
+            if val.len() > max_inline_style_bytes {
+                let mut prep_err = RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
+                    "STYLE_INLINE_BYTES_LIMIT",
+                    format!(
+                        "Inline style exceeds max_inline_style_bytes ({} > {})",
+                        val.len(),
+                        max_inline_style_bytes
+                    ),
+                )
+                .with_source(format!("inline style on <{}>", tag))
+                .with_declaration(val.clone())
+                .with_token_offset(reader_token_offset(reader))
+                .with_limit(
+                    "max_inline_style_bytes",
+                    val.len(),
+                    max_inline_style_bytes,
+                );
+                if let Some(declaration_index) = first_non_empty_declaration_index(&val) {
+                    prep_err = prep_err.with_declaration_index(declaration_index);
+                }
+                return Err(prep_err);
+            }
             let parsed = parse_inline_style(&val).map_err(|err| {
-                let mut prep_err =
-                    RenderPrepError::new("STYLE_INLINE_PARSE_ERROR", err.to_string())
-                        .with_source(format!("inline style on <{}>", tag))
-                        .with_declaration(val.clone())
-                        .with_token_offset(reader_token_offset(reader));
+                let mut prep_err = RenderPrepError::new_with_phase(
+                    ErrorPhase::Style,
+                    "STYLE_INLINE_PARSE_ERROR",
+                    err.to_string(),
+                )
+                .with_source(format!("inline style on <{}>", tag))
+                .with_declaration(val.clone())
+                .with_token_offset(reader_token_offset(reader));
                 if let Some(declaration_index) = first_non_empty_declaration_index(&val) {
                     prep_err = prep_err.with_declaration_index(declaration_index);
                 }
@@ -1734,6 +2012,10 @@ mod tests {
         };
         let err = styler.load_stylesheets(&styles).expect_err("should reject");
         assert_eq!(err.code, "STYLE_CSS_TOO_LARGE");
+        assert_eq!(err.phase, ErrorPhase::Style);
+        let limit = err.limit.expect("expected limit context");
+        assert_eq!(limit.kind.as_ref(), "max_css_bytes");
+        assert!(limit.actual > limit.limit);
     }
 
     #[test]
@@ -1753,8 +2035,35 @@ mod tests {
         };
         let err = styler.load_stylesheets(&styles).expect_err("should reject");
         assert_eq!(err.code, "STYLE_SELECTOR_LIMIT");
+        assert_eq!(err.phase, ErrorPhase::Style);
+        let limit = err.limit.expect("expected limit context");
+        assert_eq!(limit.kind.as_ref(), "max_selectors");
+        assert_eq!(limit.actual, 2);
+        assert_eq!(limit.limit, 1);
         let ctx = err.context.expect("expected context");
         assert_eq!(ctx.selector_index, Some(1));
+    }
+
+    #[test]
+    fn styler_enforces_inline_style_byte_limit() {
+        let mut styler = Styler::new(StyleConfig::default()).with_memory_budget(MemoryBudget {
+            max_inline_style_bytes: 8,
+            ..MemoryBudget::default()
+        });
+        styler
+            .load_stylesheets(&ChapterStylesheets::default())
+            .expect("load should succeed");
+        let err = styler
+            .style_chapter("<p style=\"font-weight: bold\">Hi</p>")
+            .expect_err("should reject oversized inline style");
+        assert_eq!(err.code, "STYLE_INLINE_BYTES_LIMIT");
+        assert_eq!(err.phase, ErrorPhase::Style);
+        let limit = err.limit.expect("expected limit context");
+        assert_eq!(limit.kind.as_ref(), "max_inline_style_bytes");
+        assert!(limit.actual > limit.limit);
+        let ctx = err.context.expect("expected context");
+        assert!(ctx.declaration.is_some());
+        assert!(ctx.token_offset.is_some());
     }
 
     #[test]
@@ -1774,13 +2083,40 @@ mod tests {
     #[test]
     fn render_prep_error_context_supports_typed_indices() {
         let err = RenderPrepError::new("TEST", "typed context")
+            .with_phase(ErrorPhase::Style)
+            .with_chapter_index(7)
+            .with_limit("max_css_bytes", 10, 4)
             .with_selector_index(3)
             .with_declaration_index(1)
             .with_token_offset(9);
+        assert_eq!(err.phase, ErrorPhase::Style);
+        assert_eq!(err.chapter_index, Some(7));
+        let limit = err.limit.expect("expected limit context");
+        assert_eq!(limit.kind.as_ref(), "max_css_bytes");
+        assert_eq!(limit.actual, 10);
+        assert_eq!(limit.limit, 4);
         let ctx = err.context.expect("expected context");
         assert_eq!(ctx.selector_index, Some(3));
         assert_eq!(ctx.declaration_index, Some(1));
         assert_eq!(ctx.token_offset, Some(9));
+    }
+
+    #[test]
+    fn render_prep_error_bridges_to_phase_error() {
+        let err = RenderPrepError::new("STYLE_CSS_TOO_LARGE", "limit")
+            .with_phase(ErrorPhase::Style)
+            .with_path("styles/main.css")
+            .with_chapter_index(2)
+            .with_selector_index(4)
+            .with_limit("max_css_bytes", 1024, 256);
+        let phase: PhaseError = err.into();
+        assert_eq!(phase.phase, ErrorPhase::Style);
+        assert_eq!(phase.code, "STYLE_CSS_TOO_LARGE");
+        let ctx = phase.context.expect("expected context");
+        assert_eq!(ctx.chapter_index, Some(2));
+        let limit = ctx.limit.expect("expected limit");
+        assert_eq!(limit.actual, 1024);
+        assert_eq!(limit.limit, 256);
     }
 
     #[test]

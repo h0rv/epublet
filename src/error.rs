@@ -5,13 +5,116 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use core::fmt;
+
+/// Stable processing phases for typed EPUB failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorPhase {
+    /// EPUB open/bootstrap work (container + OPF discovery).
+    Open,
+    /// Generic parsing/tokenization work.
+    Parse,
+    /// Style/CSS preparation work.
+    Style,
+    /// Layout/pagination work.
+    Layout,
+    /// Backend rendering work.
+    Render,
+}
+
+impl fmt::Display for ErrorPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Parse => write!(f, "parse"),
+            Self::Style => write!(f, "style"),
+            Self::Layout => write!(f, "layout"),
+            Self::Render => write!(f, "render"),
+        }
+    }
+}
+
+/// Typed actual-vs-limit payload for hard-cap failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorLimitContext {
+    /// Stable limit field name (e.g. `max_css_bytes`).
+    pub kind: Box<str>,
+    /// Observed value.
+    pub actual: usize,
+    /// Configured cap.
+    pub limit: usize,
+}
+
+impl ErrorLimitContext {
+    /// Build a new limit context.
+    pub fn new(kind: impl Into<String>, actual: usize, limit: usize) -> Self {
+        Self {
+            kind: kind.into().into_boxed_str(),
+            actual,
+            limit,
+        }
+    }
+}
+
+/// Rich optional context for typed phase errors.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PhaseErrorContext {
+    /// Optional archive path context.
+    pub path: Option<Box<str>>,
+    /// Optional resource href context.
+    pub href: Option<Box<str>>,
+    /// Optional chapter index.
+    pub chapter_index: Option<usize>,
+    /// Optional source context (e.g. inline style location).
+    pub source: Option<Box<str>>,
+    /// Optional selector context.
+    pub selector: Option<Box<str>>,
+    /// Optional selector index.
+    pub selector_index: Option<usize>,
+    /// Optional declaration context.
+    pub declaration: Option<Box<str>>,
+    /// Optional declaration index.
+    pub declaration_index: Option<usize>,
+    /// Optional tokenizer/read offset in bytes.
+    pub token_offset: Option<usize>,
+    /// Optional actual-vs-limit payload.
+    pub limit: Option<Box<ErrorLimitContext>>,
+}
+
+/// Typed error with explicit processing phase and context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhaseError {
+    /// Stable processing phase.
+    pub phase: ErrorPhase,
+    /// Stable machine-readable code.
+    pub code: &'static str,
+    /// Human-readable message.
+    pub message: Box<str>,
+    /// Optional rich context.
+    pub context: Option<Box<PhaseErrorContext>>,
+}
+
+impl PhaseError {
+    /// Create a typed phase error.
+    pub fn new(phase: ErrorPhase, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            code,
+            message: message.into().into_boxed_str(),
+            context: None,
+        }
+    }
+}
 
 /// Top-level error type for mu-epub operations
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum EpubError {
+    /// Typed phase-aware error with structured context.
+    Phase(PhaseError),
     /// ZIP archive error
     Zip(ZipError),
     /// XML/XHTML parsing error
@@ -46,6 +149,13 @@ pub enum EpubError {
 impl fmt::Display for EpubError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            EpubError::Phase(err) => write!(
+                f,
+                "{} error [{}]: {}",
+                err.phase.to_string().to_ascii_uppercase(),
+                err.code,
+                err.message
+            ),
             EpubError::Zip(kind) => write!(f, "ZIP error: {}", kind),
             EpubError::Parse(msg) => write!(f, "Parse error: {}", msg),
             EpubError::InvalidEpub(msg) => write!(f, "Invalid EPUB: {}", msg),
@@ -131,6 +241,12 @@ impl From<crate::tokenizer::TokenizeError> for EpubError {
     }
 }
 
+impl From<PhaseError> for EpubError {
+    fn from(err: PhaseError) -> Self {
+        Self::Phase(err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +255,19 @@ mod tests {
     fn test_epub_error_display() {
         let err = EpubError::Parse("bad xml".into());
         assert_eq!(format!("{}", err), "Parse error: bad xml");
+    }
+
+    #[test]
+    fn test_phase_error_display() {
+        let err = EpubError::Phase(PhaseError::new(
+            ErrorPhase::Style,
+            "STYLE_LIMIT",
+            "limit exceeded",
+        ));
+        assert_eq!(
+            format!("{}", err),
+            "STYLE error [STYLE_LIMIT]: limit exceeded"
+        );
     }
 
     #[test]
