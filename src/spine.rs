@@ -193,7 +193,7 @@ pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut spine = Spine::new();
     let mut in_spine = false;
 
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_very_large_spine() {
-        let mut idrefs = Vec::new();
+        let mut idrefs = Vec::with_capacity(0);
         for i in 0..150 {
             idrefs.push(alloc::format!("chapter{}", i));
         }

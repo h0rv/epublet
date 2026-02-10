@@ -1,0 +1,9 @@
+# pattern<TAB>allowed_reason<TAB>note(optional)
+# allowed_reason values:
+# - chapters_decompression_failed
+
+wild/gutenberg/pg1342.epub	chapters_decompression_failed	Known ZIP decompression limitation in chapters path
+wild/gutenberg/pg345.epub	chapters_decompression_failed	Known ZIP decompression limitation in chapters path
+wild/gutenberg/pg6130.epub	chapters_decompression_failed	Known ZIP decompression limitation in chapters path
+wild/gutenberg/pg74.epub	chapters_decompression_failed	Known ZIP decompression limitation in chapters path
+wild/gutenberg/pg98.epub	chapters_decompression_failed	Known ZIP decompression limitation in chapters path

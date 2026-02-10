@@ -156,7 +156,7 @@ pub fn tokenize_html_limited(
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = false;
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut tokens = Vec::with_capacity(limits.max_tokens.min(1024));
 
     // Stack to track nested elements for proper closing
@@ -903,7 +903,7 @@ impl TokenizeScratch {
 /// use mu_epub::tokenizer::{tokenize_html_into, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
-/// let mut tokens: Vec<Token> = Vec::new();
+/// let mut tokens: Vec<Token> = Vec::with_capacity(0);
 /// tokenize_html_into(html, &mut tokens).unwrap();
 /// ```
 pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(), TokenizeError> {
@@ -937,7 +937,7 @@ pub fn tokenize_html_into(html: &str, tokens_out: &mut Vec<Token>) -> Result<(),
 /// use mu_epub::tokenizer::{tokenize_html_with_scratch, TokenizeScratch, Token};
 ///
 /// let html = "<p>Hello <em>world</em></p>";
-/// let mut tokens: Vec<Token> = Vec::new();
+/// let mut tokens: Vec<Token> = Vec::with_capacity(0);
 /// let mut scratch = TokenizeScratch::embedded();
 /// tokenize_html_with_scratch(html, &mut tokens, &mut scratch).unwrap();
 ///
@@ -1697,7 +1697,7 @@ mod tests {
             tokens,
             vec![Token::Image {
                 src: "photo.jpg".to_string(),
-                alt: String::new(),
+                alt: String::with_capacity(0),
             }]
         );
     }
@@ -1962,7 +1962,7 @@ mod tests {
     fn test_tokenize_html_with_matches_tokenize_html() {
         let html = "<h1>T</h1><p>Hello <em>world</em><br/>line 2</p>";
         let baseline = tokenize_html(html).unwrap();
-        let mut streamed = Vec::new();
+        let mut streamed = Vec::with_capacity(0);
         tokenize_html_with(html, |token| streamed.push(token)).unwrap();
         assert_eq!(baseline, streamed);
     }

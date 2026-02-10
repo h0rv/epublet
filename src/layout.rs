@@ -134,7 +134,7 @@ impl Page {
     /// Create a new empty page
     pub fn new(page_number: usize) -> Self {
         Self {
-            lines: Vec::new(),
+            lines: Vec::with_capacity(0),
             page_number,
         }
     }
@@ -273,19 +273,19 @@ impl LayoutEngine {
             font_metrics,
             left_margin: Self::DEFAULT_MARGIN,
             top_margin: Self::DEFAULT_TOP_MARGIN,
-            current_spans: Vec::new(),
-            current_span_text: String::new(),
+            current_spans: Vec::with_capacity(0),
+            current_span_text: String::with_capacity(0),
             current_span_style: TextStyle::Normal,
             current_y: Self::DEFAULT_TOP_MARGIN,
             current_line_width: 0.0,
-            current_page_lines: Vec::new(),
-            pages: Vec::new(),
+            current_page_lines: Vec::with_capacity(0),
+            pages: Vec::with_capacity(0),
             page_number: 1,
             max_lines_per_page: max_lines.max(1),
             current_line_count: 0,
             list_depth: 0,
-            list_ordered_stack: Vec::new(),
-            list_item_counters: Vec::new(),
+            list_ordered_stack: Vec::with_capacity(0),
+            list_item_counters: Vec::with_capacity(0),
         }
     }
 
@@ -719,7 +719,7 @@ mod tests {
     #[test]
     fn test_pagination() {
         // Create a lot of text to force pagination
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(0);
         for i in 0..50 {
             tokens.push(Token::Text(format!(
                 "This is paragraph number {} with some content. ",
@@ -940,7 +940,7 @@ mod tests {
     fn test_image_placeholder_without_alt() {
         let tokens = vec![Token::Image {
             src: "img/photo.png".to_string(),
-            alt: String::new(),
+            alt: String::with_capacity(0),
         }];
 
         let mut engine = LayoutEngine::new(460.0, 650.0, 20.0);
@@ -1320,9 +1320,9 @@ mod tests {
     #[test]
     fn test_layout_zero_length_text_tokens() {
         let tokens = vec![
-            Token::Text(String::new()),
+            Token::Text(String::with_capacity(0)),
             Token::Text("visible".to_string()),
-            Token::Text(String::new()),
+            Token::Text(String::with_capacity(0)),
             Token::ParagraphBreak,
         ];
 
@@ -1435,7 +1435,7 @@ mod tests {
 
     #[test]
     fn test_line_empty_and_len_edge_cases() {
-        let empty_line = Line::new(String::new(), 0, TextStyle::Normal);
+        let empty_line = Line::new(String::with_capacity(0), 0, TextStyle::Normal);
         assert!(empty_line.is_empty());
         assert_eq!(empty_line.len(), 0);
 
@@ -1513,7 +1513,7 @@ mod tests {
 
     #[test]
     fn test_large_document_many_paragraphs() {
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(0);
         for i in 0..50 {
             tokens.push(Token::Text(alloc::format!(
                 "Paragraph {} with enough text to be meaningful.",

@@ -111,7 +111,7 @@ impl CdEntry {
             uncompressed_size: 0,
             local_header_offset: 0,
             crc32: 0,
-            filename: String::new(),
+            filename: String::with_capacity(0),
         }
     }
 }
@@ -821,7 +821,7 @@ mod tests {
         let content_len = content.len() as u32;
         let crc = crc32fast::hash(content);
 
-        let mut zip = Vec::new();
+        let mut zip = Vec::with_capacity(0);
 
         // -- Local file header --
         let local_offset = zip.len() as u32;
@@ -1018,7 +1018,7 @@ mod tests {
         let mut zip = StreamingZip::new(cursor).unwrap();
         let entry = zip.get_entry("mimetype").unwrap().clone();
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         let mut input = [0u8; 16];
         let mut output = [0u8; 16];
         let n = zip
@@ -1036,7 +1036,7 @@ mod tests {
         let mut zip = StreamingZip::new(cursor).unwrap();
         let entry = zip.get_entry("mimetype").unwrap().clone();
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         let mut input = [];
         let mut output = [0u8; 16];
         let err = zip

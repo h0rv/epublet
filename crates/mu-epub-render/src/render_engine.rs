@@ -30,7 +30,8 @@ pub enum RenderDiagnostic {
     Cancelled,
 }
 
-type DiagnosticSink = Arc<Mutex<Option<Box<dyn FnMut(RenderDiagnostic) + Send + 'static>>>>;
+type DiagnosticCallback = Arc<Mutex<Box<dyn FnMut(RenderDiagnostic) + Send + 'static>>>;
+type DiagnosticSink = Option<DiagnosticCallback>;
 
 /// Render-engine options.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -76,11 +77,23 @@ pub trait RenderCacheStore {
 }
 
 /// Per-run configuration used by `RenderEngine::begin`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RenderConfig<'a> {
     page_range: Option<PageRange>,
     cache: Option<&'a dyn RenderCacheStore>,
     cancel: Option<&'a dyn CancelToken>,
+    embedded_fonts: bool,
+}
+
+impl<'a> Default for RenderConfig<'a> {
+    fn default() -> Self {
+        Self {
+            page_range: None,
+            cache: None,
+            cancel: None,
+            embedded_fonts: true,
+        }
+    }
 }
 
 impl<'a> RenderConfig<'a> {
@@ -99,6 +112,15 @@ impl<'a> RenderConfig<'a> {
     /// Attach an optional cancellation token for session operations.
     pub fn with_cancel(mut self, cancel: &'a dyn CancelToken) -> Self {
         self.cancel = Some(cancel);
+        self
+    }
+
+    /// Enable or disable embedded-font registration for this render run.
+    ///
+    /// Disable this in constrained environments to skip EPUB font-face loading
+    /// and rely on fallback font policy.
+    pub fn with_embedded_fonts(mut self, enabled: bool) -> Self {
+        self.embedded_fonts = enabled;
         self
     }
 }
@@ -126,7 +148,7 @@ impl RenderEngine {
         Self {
             layout: LayoutEngine::new(opts.layout),
             opts,
-            diagnostic_sink: Arc::new(Mutex::new(None)),
+            diagnostic_sink: None,
         }
     }
 
@@ -135,16 +157,15 @@ impl RenderEngine {
     where
         F: FnMut(RenderDiagnostic) + Send + 'static,
     {
-        if let Ok(mut slot) = self.diagnostic_sink.lock() {
-            *slot = Some(Box::new(sink));
-        }
+        self.diagnostic_sink = Some(Arc::new(Mutex::new(Box::new(sink))));
     }
 
     fn emit_diagnostic(&self, diagnostic: RenderDiagnostic) {
-        if let Ok(mut slot) = self.diagnostic_sink.lock() {
-            if let Some(sink) = slot.as_mut() {
-                sink(diagnostic);
-            }
+        let Some(sink) = &self.diagnostic_sink else {
+            return;
+        };
+        if let Ok(mut sink) = sink.lock() {
+            sink(diagnostic);
         }
     }
 
@@ -186,7 +207,7 @@ impl RenderEngine {
                 Some(self.layout.start_session())
             },
             pending_pages: pending,
-            rendered_pages: Vec::new(),
+            rendered_pages: Vec::with_capacity(0),
             page_index: 0,
             completed: cached_hit,
         }
@@ -213,8 +234,8 @@ impl RenderEngine {
         chapter_index: usize,
         config: RenderConfig<'_>,
     ) -> Result<Vec<RenderPage>, RenderEngineError> {
-        let mut pages = Vec::new();
         let page_limit = self.opts.prep.memory.max_pages_in_memory;
+        let mut pages = Vec::with_capacity(page_limit.min(8));
         let mut dropped_pages = 0usize;
         self.prepare_chapter_with_config(book, chapter_index, config, |page| {
             if pages.len() < page_limit {
@@ -265,6 +286,54 @@ impl RenderEngine {
         })
     }
 
+    /// Prepare and layout caller-provided chapter bytes and stream each page.
+    ///
+    /// This path avoids internal chapter-byte allocation and is intended for
+    /// embedded call sites that keep a reusable chapter buffer.
+    pub fn prepare_chapter_bytes_with<R, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        html: &[u8],
+        on_page: F,
+    ) -> Result<(), RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(RenderPage),
+    {
+        self.prepare_chapter_bytes_with_config(
+            book,
+            chapter_index,
+            html,
+            RenderConfig::default(),
+            on_page,
+        )
+    }
+
+    /// Prepare and layout caller-provided chapter bytes with explicit config.
+    pub fn prepare_chapter_bytes_with_config<R, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        html: &[u8],
+        config: RenderConfig<'_>,
+        on_page: F,
+    ) -> Result<(), RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        F: FnMut(RenderPage),
+    {
+        let cancel = config.cancel.unwrap_or(&NeverCancel);
+        self.prepare_chapter_bytes_with_cancel_and_config(
+            book,
+            chapter_index,
+            html,
+            cancel,
+            config,
+            on_page,
+        )
+    }
+
     /// Prepare and layout a chapter while honoring cancellation.
     pub fn prepare_chapter_with_cancel<R, C, F>(
         &self,
@@ -295,6 +364,7 @@ impl RenderEngine {
         C: CancelToken + ?Sized,
         F: FnMut(RenderPage),
     {
+        let embedded_fonts = config.embedded_fonts;
         let started = Instant::now();
         if cancel.is_cancelled() {
             self.emit_diagnostic(RenderDiagnostic::Cancelled);
@@ -306,9 +376,63 @@ impl RenderEngine {
             return Ok(());
         }
         let mut prep = RenderPrep::new(self.opts.prep).with_serif_default();
-        prep = prep.with_embedded_fonts_from_book(book)?;
+        if embedded_fonts {
+            prep = prep.with_embedded_fonts_from_book(book)?;
+        }
         let mut saw_cancelled = false;
         prep.prepare_chapter_with(book, chapter_index, |item| {
+            if saw_cancelled || cancel.is_cancelled() {
+                saw_cancelled = true;
+                return;
+            }
+            if session.push(item).is_err() {
+                saw_cancelled = true;
+                return;
+            }
+            session.drain_pages(&mut on_page);
+        })?;
+        if saw_cancelled || cancel.is_cancelled() {
+            self.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        session.finish()?;
+        session.drain_pages(&mut on_page);
+        let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        self.emit_diagnostic(RenderDiagnostic::ReflowTimeMs(elapsed));
+        Ok(())
+    }
+
+    fn prepare_chapter_bytes_with_cancel_and_config<R, C, F>(
+        &self,
+        book: &mut EpubBook<R>,
+        chapter_index: usize,
+        html: &[u8],
+        cancel: &C,
+        config: RenderConfig<'_>,
+        mut on_page: F,
+    ) -> Result<(), RenderEngineError>
+    where
+        R: std::io::Read + std::io::Seek,
+        C: CancelToken + ?Sized,
+        F: FnMut(RenderPage),
+    {
+        let embedded_fonts = config.embedded_fonts;
+        let started = Instant::now();
+        if cancel.is_cancelled() {
+            self.emit_diagnostic(RenderDiagnostic::Cancelled);
+            return Err(RenderEngineError::Cancelled);
+        }
+        let mut session = self.begin(chapter_index, config);
+        if session.is_complete() {
+            session.drain_pages(&mut on_page);
+            return Ok(());
+        }
+        let mut prep = RenderPrep::new(self.opts.prep).with_serif_default();
+        if embedded_fonts {
+            prep = prep.with_embedded_fonts_from_book(book)?;
+        }
+        let mut saw_cancelled = false;
+        prep.prepare_chapter_bytes_with(book, chapter_index, html, |item| {
             if saw_cancelled || cancel.is_cancelled() {
                 saw_cancelled = true;
                 return;
@@ -352,7 +476,7 @@ impl RenderEngine {
         range: PageRange,
     ) -> Result<Vec<RenderPage>, RenderEngineError> {
         if range.start >= range.end {
-            return Ok(Vec::new());
+            return Ok(Vec::with_capacity(0));
         }
         self.prepare_chapter_with_config_collect(
             book,

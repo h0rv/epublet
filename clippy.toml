@@ -1,0 +1,6 @@
+disallowed-methods = [
+    { path = "alloc::vec::Vec::new", reason = "Use Vec::with_capacity(...) or caller-owned buffers to make allocation intent explicit." },
+    { path = "std::vec::Vec::new", reason = "Use Vec::with_capacity(...) or caller-owned buffers to make allocation intent explicit." },
+    { path = "alloc::string::String::new", reason = "Use String::with_capacity(...) so line/chapter buffers have explicit budgets." },
+    { path = "std::string::String::new", reason = "Use String::with_capacity(...) so line/chapter buffers have explicit budgets." },
+]

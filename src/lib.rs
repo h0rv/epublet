@@ -18,6 +18,18 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![warn(missing_docs)]
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
 #![deny(
     clippy::large_enum_variant,
     clippy::large_stack_arrays,
@@ -30,7 +42,6 @@
     clippy::implicit_clone,
     clippy::inefficient_to_string
 )]
-
 extern crate alloc;
 
 pub mod css;

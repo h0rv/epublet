@@ -1,5 +1,18 @@
 //! embedded-graphics renderer for `mu-epub-render` pages.
 
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 use embedded_graphics::{
     mono_font::{
         ascii::{FONT_6X13_ITALIC, FONT_7X13_BOLD, FONT_8X13, FONT_9X15_BOLD},
@@ -188,17 +201,11 @@ impl FontBackend for MonoFontBackend {
 
 /// Optional TTF backend feature gate.
 #[cfg(feature = "ttf-backend")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TtfFallbackPolicy {
     /// Always fallback to mono-font rendering when TTF shaping/raster is unavailable.
+    #[default]
     MonoOnly,
-}
-
-#[cfg(feature = "ttf-backend")]
-impl Default for TtfFallbackPolicy {
-    fn default() -> Self {
-        Self::MonoOnly
-    }
 }
 
 /// Options for the experimental `ttf-backend` path.

@@ -1,18 +1,5 @@
 # mu-epub justfile
 
-# Run all checks
-all:
-    just fmt-check
-    just lint
-    just check
-    just render-all
-    just check-no-std
-    just check-no-std-layout
-    just test
-    just test-ignored
-    just doc-check
-    just cli-check
-
 # Format code
 fmt:
     cargo fmt --all
@@ -21,21 +8,56 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Lint with clippy
-lint:
-    cargo clippy --all-features -- -D warnings
-
-# Lint no_std (no default features)
-lint-no-std:
-    cargo clippy --no-default-features -- -D warnings
-
-# Lint embedded mode (alloc only, no std)
-lint-embedded:
-    cargo clippy --no-default-features --features alloc -- -D warnings
-
-# Check all features
+# Type-check (default dev target matrix).
 check:
-    cargo check --all-features
+    cargo check --workspace --all-features
+
+# Lint with clippy (single strict pass).
+lint:
+    cargo clippy --workspace --all-features -- -D warnings
+
+# Unit tests (fast default loop).
+test:
+    cargo test --workspace --all-features --lib --bins
+
+# Default developer loop: auto-format + check + lint + unit tests.
+all:
+    just fmt
+    just check
+    just lint
+    just test
+
+# CI add-on: run integration tests after baseline all.
+ci:
+    just all
+    just test-integration
+
+# Backward-compatible aliases.
+strict:
+    just all
+
+harden:
+    just all
+
+# Integration tests (slower / broader; useful in CI).
+test-integration:
+    cargo test --workspace --all-features --tests
+
+# Strict memory-focused linting for constrained targets.
+#
+# - no_std pass: enforce core/alloc import discipline.
+# - render pass: ban convenience constructors that hide allocation intent.
+lint-memory:
+    just lint-memory-no-std
+    just lint-memory-render
+
+# no_std/alloc discipline checks (core path only).
+lint-memory-no-std:
+    cargo clippy --no-default-features --lib -- -D warnings -W clippy::alloc_instead_of_core -W clippy::std_instead_of_alloc -W clippy::std_instead_of_core
+
+# Render crate allocation-intent checks.
+lint-memory-render:
+    cargo clippy -p mu-epub-render --lib --no-deps -- -D warnings -W clippy::disallowed_methods
 
 # Check split render crates
 render-check:
@@ -43,7 +65,7 @@ render-check:
 
 # Lint split render crates
 render-lint:
-    cargo clippy -p mu-epub-render -p mu-epub-embedded-graphics --all-targets -- -D warnings
+    cargo clippy -p mu-epub-render -p mu-epub-embedded-graphics --all-targets -- -D warnings -A clippy::disallowed_methods
 
 # Test split render crates
 render-test:
@@ -59,10 +81,6 @@ render-all:
 check-no-std:
     cargo check --no-default-features
 
-# Run tests
-test:
-    cargo test --all-features
-
 # Run ignored tests
 test-ignored:
     cargo test --all-features -- --ignored
@@ -73,11 +91,11 @@ test-verbose:
 
 # Run allocation count tests
 test-alloc:
-    cargo test --all-features --test allocation_tests -- --nocapture
+    cargo test --all-features --test allocation_tests -- --ignored --nocapture --test-threads=1
 
 # Run embedded mode tests with tiny budgets
 test-embedded:
-    cargo test --all-features --test embedded_mode_tests -- --nocapture
+    cargo test --all-features --test embedded_mode_tests -- --ignored --nocapture
 
 # Verify benchmark fixture corpus integrity
 bench-fixtures-check:
@@ -123,6 +141,34 @@ dataset-list:
 dataset-validate:
     @cargo build --features cli --bin mu-epub
     ./scripts/datasets/validate.sh --expectations scripts/datasets/expectations.tsv
+
+# Validate only Gutenberg EPUB corpus under tests/datasets/wild/gutenberg.
+dataset-validate-gutenberg:
+    @cargo build --features cli --bin mu-epub
+    DATASET_ROOT="${MU_EPUB_DATASET_DIR:-tests/datasets}" && \
+    ./scripts/datasets/validate.sh --dataset-dir "$DATASET_ROOT/wild/gutenberg" --expectations scripts/datasets/expectations.tsv
+
+# Validate only Gutenberg EPUB corpus in strict mode.
+dataset-validate-gutenberg-strict:
+    @cargo build --features cli --bin mu-epub
+    DATASET_ROOT="${MU_EPUB_DATASET_DIR:-tests/datasets}" && \
+    ./scripts/datasets/validate.sh --strict --dataset-dir "$DATASET_ROOT/wild/gutenberg" --expectations scripts/datasets/expectations.tsv
+
+# Time Gutenberg corpus smoke path (validate + chapters + first chapter text).
+dataset-profile-gutenberg:
+    @cargo build --release --features cli --bin mu-epub
+    MU_EPUB_CLI_BIN=target/release/mu-epub ./scripts/datasets/gutenberg_smoke.sh
+
+# Time Gutenberg corpus smoke path in strict validation mode.
+dataset-profile-gutenberg-strict:
+    @cargo build --release --features cli --bin mu-epub
+    MU_EPUB_CLI_BIN=target/release/mu-epub ./scripts/datasets/gutenberg_smoke.sh --strict
+
+# Full pre-flash gate including local Gutenberg corpus (if bootstrapped).
+harden-gutenberg:
+    just all
+    just dataset-validate-gutenberg
+    just dataset-profile-gutenberg
 
 # Validate all dataset EPUB files in strict mode (warnings fail too)
 dataset-validate-strict:

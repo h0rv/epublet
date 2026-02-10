@@ -134,7 +134,7 @@ impl LayoutEngine {
     where
         I: IntoIterator<Item = StyledEventOrRun>,
     {
-        let mut pages = Vec::new();
+        let mut pages = Vec::with_capacity(8);
         self.layout_with(items, |page| pages.push(page));
         pages
     }
@@ -314,7 +314,7 @@ impl LayoutState {
             cursor_y: cfg.margin_top,
             page: RenderPage::new(1),
             line: None,
-            emitted: Vec::new(),
+            emitted: Vec::with_capacity(2),
         }
     }
 
@@ -332,7 +332,7 @@ impl LayoutState {
 
         if self.line.is_none() {
             self.line = Some(CurrentLine {
-                text: String::new(),
+                text: String::with_capacity(64),
                 style: style.clone(),
                 width_px: 0.0,
                 line_height_px: line_height_px(&style, &self.cfg),

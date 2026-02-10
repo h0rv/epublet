@@ -92,20 +92,20 @@ pub struct EpubMetadata {
 impl Default for EpubMetadata {
     fn default() -> Self {
         Self {
-            title: String::new(),
-            author: String::new(),
+            title: String::with_capacity(0),
+            author: String::with_capacity(0),
             language: String::from("en"),
-            manifest: Vec::new(),
+            manifest: Vec::with_capacity(0),
             cover_id: None,
             date: None,
             publisher: None,
             rights: None,
             description: None,
-            subjects: Vec::new(),
+            subjects: Vec::with_capacity(0),
             identifier: None,
             modified: None,
             rendition_layout: None,
-            guide: Vec::new(),
+            guide: Vec::with_capacity(0),
             opf_path: None,
         }
     }
@@ -143,7 +143,7 @@ pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut opf_path: Option<String> = None;
 
     loop {
@@ -193,7 +193,7 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut metadata = EpubMetadata::new();
 
     // State tracking

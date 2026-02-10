@@ -180,7 +180,10 @@ LATEST_MISMATCH_LINK="$OUT_DIR/latest.mismatches.tsv"
 if [ -n "$MANIFEST_FILE" ]; then
   EPUBS=("${MANIFEST_FILES[@]}")
 else
-  mapfile -t EPUBS < <(find "$DATASET_DIR" -type f -iname '*.epub' | sort)
+  EPUBS=()
+  while IFS= read -r epub_path; do
+    EPUBS+=("$epub_path")
+  done < <(find "$DATASET_DIR" -type f -iname '*.epub' | sort)
 fi
 TOTAL="${#EPUBS[@]}"
 if [ "$TOTAL" -eq 0 ]; then

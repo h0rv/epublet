@@ -18,7 +18,7 @@ enum Json {
 
 impl Json {
     fn render(&self, pretty: bool) -> String {
-        let mut out = String::new();
+        let mut out = String::with_capacity(256);
         self.write_into(&mut out, pretty, 0);
         out
     }

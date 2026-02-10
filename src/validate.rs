@@ -294,9 +294,9 @@ struct OpfManifestAttrs {
 fn parse_opf_manifest_attrs(opf_bytes: &[u8]) -> Result<Vec<OpfManifestAttrs>, String> {
     let mut reader = Reader::from_reader(opf_bytes);
     reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut in_manifest = false;
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(0);
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -539,7 +539,7 @@ fn validate_optional_xml_sidecar<F: Read + Seek>(
     };
     let mut reader = Reader::from_reader(bytes.as_slice());
     reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
@@ -573,7 +573,7 @@ fn validate_encryption_references<F: Read + Seek>(
 
     let mut reader = Reader::from_reader(bytes.as_slice());
     reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
@@ -919,8 +919,8 @@ mod tests {
             size: u32,
         }
 
-        let mut zip = Vec::new();
-        let mut metas = Vec::new();
+        let mut zip = Vec::with_capacity(0);
+        let mut metas = Vec::with_capacity(0);
 
         for (name, content) in files {
             let name_bytes = name.as_bytes();

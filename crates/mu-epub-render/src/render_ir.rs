@@ -29,12 +29,12 @@ impl RenderPage {
     pub fn new(page_number: usize) -> Self {
         Self {
             page_number,
-            commands: Vec::new(),
-            content_commands: Vec::new(),
-            chrome_commands: Vec::new(),
-            overlay_commands: Vec::new(),
-            overlay_items: Vec::new(),
-            annotations: Vec::new(),
+            commands: Vec::with_capacity(0),
+            content_commands: Vec::with_capacity(0),
+            chrome_commands: Vec::with_capacity(0),
+            overlay_commands: Vec::with_capacity(0),
+            overlay_items: Vec::with_capacity(0),
+            annotations: Vec::with_capacity(0),
             metrics: PageMetrics {
                 chapter_page_index: page_number.saturating_sub(1),
                 ..PageMetrics::default()

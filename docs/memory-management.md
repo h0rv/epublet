@@ -43,6 +43,34 @@ for i in 0..book.chapter_count() {
 }
 ```
 
+### Render with caller-owned chapter bytes
+
+```rust
+let mut chapter_buf = Vec::with_capacity(128 * 1024);
+let chapter = book.chapter(chapter_index)?;
+chapter_buf.clear();
+book.read_resource_into_with_hard_cap(
+    &chapter.href,
+    &mut chapter_buf,
+    render_opts.prep.memory.max_entry_bytes,
+)?;
+
+engine.prepare_chapter_bytes_with(
+    &mut book,
+    chapter_index,
+    &chapter_buf,
+    |page| consume_page(page),
+)?;
+
+// Optional low-RAM mode: skip EPUB embedded-font registration per run.
+engine.prepare_chapter_with_config(
+    &mut book,
+    chapter_index,
+    RenderConfig::default().with_embedded_fonts(false),
+    |page| consume_page(page),
+)?;
+```
+
 ### Scratch structs
 
 ```rust
@@ -95,3 +123,29 @@ let mut chapter_tokens: HVec<Token, ???> = HVec::new(); // don't do this
 - [ ] All scratch buffers reused via `.clear()`
 - [ ] All capacity limits return `Result`
 - [ ] Streaming chunk size configurable, defaults to 4KB embedded / 16KB std
+
+## Local Hardening Loop
+
+- `just fmt`
+: auto-format source.
+- `just check`
+: workspace type-check with `all-features`.
+- `just lint`
+: workspace Clippy with warnings denied.
+- `just test`
+: fast default unit-test loop (`--lib --bins`).
+- `just all`
+: canonical single command (`fmt` + `check` + `lint` + `test`).
+- `just ci`
+: CI gate (`just all` + `test-integration`).
+- `just lint-memory`
+: optional deep memory linting (`no_std` core/alloc discipline + renderer allocation-intent checks).
+- `just test-alloc`
+: optional allocation-counter stress tests (`--ignored`, serialized threads).
+- `just test-embedded`
+: optional tiny-budget embedded-path tests (`--ignored`).
+- `just harden-gutenberg`
+: runs `just all`, then validates/profiles local Gutenberg corpus (after `just dataset-bootstrap-gutenberg`).
+- `just dataset-profile-gutenberg`
+: generates `target/datasets/gutenberg-smoke-*.csv` with per-book timings for `validate`, `chapters`, and `chapter-text --index 0`.
+  Known corpus-specific failures can be tracked in `scripts/datasets/gutenberg-smoke-expectations.tsv` and are reported as `expected_fail`.

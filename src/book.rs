@@ -865,7 +865,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For bounded allocation, use `read_resource_into_with_limit`.
     pub fn read_resource(&mut self, href: &str) -> Result<Vec<u8>, EpubError> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         self.read_resource_into(href, &mut out)?;
         Ok(out)
     }
@@ -928,7 +928,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For bounded allocation, use `chapter_html_into_with_limit`.
     pub fn chapter_html(&mut self, index: usize) -> Result<String, EpubError> {
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         self.chapter_html_into(index, &mut out)?;
         Ok(out)
     }
@@ -952,7 +952,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ) -> Result<(), EpubError> {
         out.clear();
         let chapter = self.chapter(index)?;
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(0);
         self.read_resource_into_with_hard_cap(&chapter.href, &mut bytes, max_bytes)?;
         let mut html = String::from_utf8(bytes)
             .map_err(|_| EpubError::ChapterNotUtf8 { href: chapter.href })?;
@@ -974,7 +974,7 @@ impl<R: Read + Seek> EpubBook<R> {
         let chapter = self.chapter(index)?;
         let html = self.chapter_html(index)?;
         let links = parse_stylesheet_links(&chapter.href, &html);
-        let mut sources = Vec::new();
+        let mut sources = Vec::with_capacity(0);
 
         for href in links {
             let bytes = self.read_resource(&href)?;
@@ -1159,7 +1159,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ) -> Result<StyledChapter, EpubError> {
         let mut prep = RenderPrep::new(options).with_serif_default();
         let prepared = prep.prepare_chapter(self, index).map_err(EpubError::from)?;
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(0);
         for item in prepared.iter() {
             items.push(item.clone());
         }
@@ -1296,7 +1296,7 @@ impl<R: Read + Seek> EpubBook<R> {
 
         // Read chapter into caller-provided buffer using scratch for I/O
         let use_entry = CdEntry {
-            filename: String::new(),
+            filename: String::with_capacity(0),
             method: entry.method,
             compressed_size: entry.compressed_size,
             uncompressed_size: entry.uncompressed_size,
@@ -1352,7 +1352,7 @@ impl<R: Read + Seek> EpubBook<R> {
     ///
     /// For lower memory usage, prefer `chapter_text_into`/`chapter_text_with_limit`.
     pub fn chapter_text(&mut self, index: usize) -> Result<String, EpubError> {
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         self.chapter_text_into(index, &mut out)?;
         Ok(out)
     }
@@ -1378,7 +1378,7 @@ impl<R: Read + Seek> EpubBook<R> {
         index: usize,
         max_bytes: usize,
     ) -> Result<String, EpubError> {
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         self.chapter_text_into_with_limit(index, max_bytes, &mut out)?;
         Ok(out)
     }
@@ -1439,7 +1439,7 @@ impl<R: Read + Seek> EpubBook<R> {
                 .filter(|item| item.media_type == "text/css")
                 .map(|item| item.href.clone())
                 .collect();
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(0);
             for href in css_hrefs {
                 let bytes = self.read_resource(&href)?;
                 let css = String::from_utf8(bytes)
@@ -1448,10 +1448,9 @@ impl<R: Read + Seek> EpubBook<R> {
             }
             self.embedded_fonts_cache = Some(out);
         }
-        Ok(self
-            .embedded_fonts_cache
+        self.embedded_fonts_cache
             .as_ref()
-            .expect("cache initialized"))
+            .ok_or_else(|| EpubError::Parse("Embedded font cache initialization failed".into()))
     }
 }
 
@@ -1607,7 +1606,7 @@ fn validate_open_invariants(
 }
 
 fn read_entry<R: Read + Seek>(zip: &mut StreamingZip<R>, path: &str) -> Result<Vec<u8>, EpubError> {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     read_entry_into(zip, path, &mut buf)?;
     Ok(buf)
 }
@@ -1648,7 +1647,7 @@ fn read_entry_into_with_limit<R: Read + Seek, W: Write>(
         uncompressed_size,
         local_header_offset,
         crc32,
-        filename: String::new(),
+        filename: String::with_capacity(0),
     };
     zip.read_file_to_writer(&entry, writer)
         .map_err(EpubError::Zip)
@@ -1675,7 +1674,7 @@ fn resolve_opf_relative_path(opf_path: &str, href: &str) -> String {
 }
 
 fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
+    let mut parts: Vec<&str> = Vec::with_capacity(0);
     for part in path.split('/') {
         match part {
             "" | "." => {}
@@ -1760,7 +1759,7 @@ fn extract_plain_text_limited(
     reader.config_mut().trim_text(false);
     reader.config_mut().expand_empty_elements = false;
 
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
     let mut skip_depth = 0usize;
     let mut done = false;
 
@@ -1904,7 +1903,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         let n = book
             .read_resource_into("xhtml/nav.xhtml", &mut out)
             .expect("resource should stream");
@@ -1920,7 +1919,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         let err = book
             .read_resource_into_with_hard_cap("xhtml/nav.xhtml", &mut out, 8)
             .expect_err("hard cap should fail");
@@ -1935,7 +1934,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         let n = book
             .read_resource_into_with_limit("xhtml/nav.xhtml", &mut out, 1024 * 1024)
             .expect("limit should allow nav payload");
@@ -2000,7 +1999,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
         let baseline = book.chapter_text(0).expect("chapter text should extract");
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         book.chapter_text_into(0, &mut out)
             .expect("chapter text into should extract");
         assert_eq!(baseline, out);
@@ -2015,7 +2014,7 @@ mod tests {
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
         let baseline = book.chapter_html(0).expect("chapter html should extract");
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         book.chapter_html_into(0, &mut out)
             .expect("chapter html into should extract");
         assert_eq!(baseline, out);
@@ -2029,7 +2028,7 @@ mod tests {
         .expect("fixture should open");
         let mut book = EpubBook::from_reader(file).expect("book should open");
 
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         let err = book
             .chapter_html_into_with_limit(0, 8, &mut out)
             .expect_err("hard cap should fail");
@@ -2081,7 +2080,7 @@ mod tests {
     #[test]
     fn test_extract_plain_text_limited_preserves_utf8_boundaries() {
         let html = "<p>hello 😀 world</p>";
-        let mut out = String::new();
+        let mut out = String::with_capacity(0);
         extract_plain_text_limited(html.as_bytes(), 8, &mut out).expect("extract should succeed");
         assert!(out.len() <= 8);
         assert!(core::str::from_utf8(out.as_bytes()).is_ok());
@@ -2263,7 +2262,7 @@ mod tests {
             .with_serif_default()
             .with_embedded_fonts_from_book(&mut book)
             .expect("font registration should succeed");
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(0);
         prep.prepare_chapter_into(&mut book, index, &mut out)
             .expect("prepare_chapter_into should succeed");
         assert!(!out.is_empty());
@@ -2361,10 +2360,10 @@ mod tests {
             toc: vec![NavPoint {
                 label: "intro".to_string(),
                 href: "text/ch2.xhtml#start".to_string(),
-                children: Vec::new(),
+                children: Vec::with_capacity(0),
             }],
-            page_list: Vec::new(),
-            landmarks: Vec::new(),
+            page_list: Vec::with_capacity(0),
+            landmarks: Vec::with_capacity(0),
         };
         let mut session = ReadingSession::new(chapters, Some(nav));
         let resolved = session

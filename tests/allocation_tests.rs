@@ -6,6 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fs::File;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use mu_epub::book::EpubBook;
 use mu_epub::zip::StreamingZip;
@@ -17,6 +18,7 @@ const SAMPLE_EPUB_PATH: &str =
 /// Global allocation counter
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static DEALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ALLOC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Counting allocator wrapper
 struct CountingAllocator;
@@ -55,6 +57,7 @@ fn has_sample_epub() -> bool {
 #[test]
 #[ignore = "Requires sample EPUB"]
 fn test_open_allocations_are_bounded() {
+    let _guard = ALLOC_TEST_LOCK.lock().expect("alloc test lock");
     if !has_sample_epub() {
         return;
     }
@@ -82,6 +85,7 @@ fn test_open_allocations_are_bounded() {
 #[test]
 #[ignore = "Requires sample EPUB"]
 fn test_first_page_allocations_are_bounded() {
+    let _guard = ALLOC_TEST_LOCK.lock().expect("alloc test lock");
     if !has_sample_epub() {
         return;
     }
@@ -111,6 +115,7 @@ fn test_first_page_allocations_are_bounded() {
 #[test]
 #[ignore = "Requires sample EPUB"]
 fn test_next_page_allocations_are_bounded() {
+    let _guard = ALLOC_TEST_LOCK.lock().expect("alloc test lock");
     if !has_sample_epub() {
         return;
     }
@@ -145,6 +150,7 @@ fn test_next_page_allocations_are_bounded() {
 #[test]
 #[ignore = "Requires sample EPUB"]
 fn test_zip_read_file_with_scratch_reduces_allocations() {
+    let _guard = ALLOC_TEST_LOCK.lock().expect("alloc test lock");
     if !has_sample_epub() {
         return;
     }
@@ -196,45 +202,40 @@ fn test_zip_read_file_with_scratch_reduces_allocations() {
 #[test]
 #[ignore = "Requires sample EPUB"]
 fn test_chapter_text_into_reduces_allocations() {
+    let _guard = ALLOC_TEST_LOCK.lock().expect("alloc test lock");
     if !has_sample_epub() {
         return;
     }
 
     let file = File::open(SAMPLE_EPUB_PATH).expect("Failed to open sample EPUB");
     let mut book = EpubBook::from_reader(file).expect("Failed to open EPUB");
+    let mut out = String::with_capacity(16 * 1024);
 
-    // Test chapter_text (allocates new String)
+    // First call includes initial setup and any one-time allocations.
     reset_counters();
-    let start_allocs = alloc_count();
-
-    let _text = book.chapter_text(0).expect("Failed to read chapter text");
-
-    let allocs_with_return = alloc_count() - start_allocs;
-
-    // Test chapter_text_into (reuses buffer)
-    reset_counters();
-    let start_allocs = alloc_count();
-
-    let mut out = String::new();
+    let first_start = alloc_count();
     book.chapter_text_into(0, &mut out)
         .expect("Failed to read chapter text into");
+    let first_call_allocs = alloc_count() - first_start;
 
-    let allocs_with_into = alloc_count() - start_allocs;
+    // Second call reuses the same output buffer; allocation count should not grow.
+    let second_start = alloc_count();
+    book.chapter_text_into(0, &mut out)
+        .expect("Failed to read chapter text into (second call)");
+    let second_call_allocs = alloc_count() - second_start;
 
     println!(
-        "Allocations with return: {}, with into: {}",
-        allocs_with_return, allocs_with_into
+        "chapter_text_into allocations (first call): {}, (second call): {}",
+        first_call_allocs, second_call_allocs
     );
 
-    // Note: Both APIs allocate similarly since they both need to read from ZIP.
-    // The _into API gives caller control over the output buffer, which can
-    // reduce allocations when the same buffer is reused across multiple calls.
-    // For a single call comparison, allocations are expected to be similar.
+    // Reusing the same caller-owned buffer should never require materially more
+    // allocations on the second call.
     assert!(
-        allocs_with_into <= allocs_with_return + 10,
-        "chapter_text_into should not significantly exceed chapter_text allocations: {} vs {}",
-        allocs_with_into,
-        allocs_with_return
+        second_call_allocs <= first_call_allocs + 4,
+        "chapter_text_into buffer reuse regressed: first={} second={}",
+        first_call_allocs,
+        second_call_allocs
     );
 }
 

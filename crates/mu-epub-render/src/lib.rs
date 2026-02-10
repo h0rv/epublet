@@ -1,5 +1,18 @@
 //! Render IR, layout engine, and orchestration for `mu-epub`.
 
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        clippy::unwrap_used,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 mod render_engine;
 mod render_ir;
 mod render_layout;

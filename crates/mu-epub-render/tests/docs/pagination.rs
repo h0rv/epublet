@@ -99,6 +99,33 @@ fn prepare_chapter_iter_streaming_matches_full_render() {
 }
 
 #[test]
+fn prepare_chapter_bytes_with_matches_full_render() {
+    let engine = build_engine();
+    let mut book = open_fixture_book();
+    let chapter = 0usize;
+
+    let expected = engine
+        .prepare_chapter(&mut book, chapter)
+        .expect("full chapter render should succeed");
+
+    let chapter_href = book.chapter(chapter).expect("chapter should exist").href;
+    let mut chapter_buf = Vec::with_capacity(128 * 1024);
+    book.read_resource_into_with_hard_cap(
+        &chapter_href,
+        &mut chapter_buf,
+        RenderPrepOptions::default().memory.max_entry_bytes,
+    )
+    .expect("chapter bytes should load");
+
+    let mut actual = Vec::new();
+    engine
+        .prepare_chapter_bytes_with(&mut book, chapter, &chapter_buf, |page| actual.push(page))
+        .expect("chapter-bytes render should succeed");
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn prepare_chapter_iter_streaming_reports_errors() {
     let engine = build_engine();
     let invalid_chapter = usize::MAX;
@@ -135,6 +162,24 @@ fn prepare_chapter_with_cancel_stops_early() {
         engine.prepare_chapter_with_cancel(&mut book, 0, &AlreadyCancelled, |_page| saw_pages += 1);
     assert!(result.is_err());
     assert_eq!(saw_pages, 0);
+}
+
+#[test]
+fn prepare_chapter_with_config_can_disable_embedded_fonts() {
+    let engine = build_engine();
+    let mut book = open_fixture_book();
+    let (chapter, _) = chapter_with_min_pages(&engine, &mut book, 1)
+        .expect("fixture should contain at least one renderable chapter");
+    let mut pages = Vec::new();
+    engine
+        .prepare_chapter_with_config(
+            &mut book,
+            chapter,
+            RenderConfig::default().with_embedded_fonts(false),
+            |page| pages.push(page),
+        )
+        .expect("render without embedded fonts should succeed");
+    assert!(!pages.is_empty());
 }
 
 #[derive(Clone, Copy, Debug, Default)]

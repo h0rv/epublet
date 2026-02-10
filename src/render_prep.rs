@@ -503,7 +503,7 @@ impl Styler {
         Self {
             config,
             memory: MemoryBudget::default(),
-            parsed: Vec::new(),
+            parsed: Vec::with_capacity(0),
         }
     }
 
@@ -582,7 +582,7 @@ impl Styler {
 
     /// Style a chapter and return a stream of events and runs.
     pub fn style_chapter(&self, html: &str) -> Result<StyledChapter, RenderPrepError> {
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(0);
         self.style_chapter_with(html, |item| items.push(item))?;
         Ok(StyledChapter { items })
     }
@@ -615,8 +615,8 @@ impl Styler {
     {
         let mut reader = Reader::from_reader(html_bytes);
         reader.config_mut().trim_text(false);
-        let mut buf = Vec::new();
-        let mut stack: Vec<ElementCtx> = Vec::new();
+        let mut buf = Vec::with_capacity(0);
+        let mut stack: Vec<ElementCtx> = Vec::with_capacity(0);
         let mut skip_depth = 0usize;
 
         loop {
@@ -696,7 +696,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::new(),
+                        resolved_family: String::with_capacity(0),
                     }));
                 }
                 Ok(Event::CData(e)) => {
@@ -729,7 +729,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::new(),
+                        resolved_family: String::with_capacity(0),
                     }));
                 }
                 Ok(Event::GeneralRef(e)) => {
@@ -770,7 +770,7 @@ impl Styler {
                         text: normalized,
                         style,
                         font_id: 0,
-                        resolved_family: String::new(),
+                        resolved_family: String::with_capacity(0),
                     }));
                 }
                 Ok(Event::Eof) => break,
@@ -956,7 +956,7 @@ impl FontResolver {
         Self {
             policy,
             limits: FontLimits::default(),
-            faces: Vec::new(),
+            faces: Vec::with_capacity(0),
         }
     }
 
@@ -978,7 +978,7 @@ impl FontResolver {
     {
         self.faces.clear();
         let mut total = 0usize;
-        let mut dedupe_keys: Vec<(String, u16, EmbeddedFontStyle, String)> = Vec::new();
+        let mut dedupe_keys: Vec<(String, u16, EmbeddedFontStyle, String)> = Vec::with_capacity(0);
 
         for face in fonts {
             let normalized_family = normalize_family(&face.family);
@@ -1064,7 +1064,7 @@ impl FontResolver {
         style: &ComputedTextStyle,
         text: Option<&str>,
     ) -> FontResolutionTrace {
-        let mut reasons = Vec::new();
+        let mut reasons = Vec::with_capacity(0);
         for family in &style.family_stack {
             if !self.policy.allow_embedded_fonts {
                 reasons.push("embedded fonts disabled by policy".to_string());
@@ -1322,7 +1322,7 @@ impl RenderPrep {
         book: &mut EpubBook<R>,
         index: usize,
     ) -> Result<PreparedChapter, RenderPrepError> {
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(0);
         self.prepare_chapter_with(book, index, |item| items.push(item))?;
         Ok(PreparedChapter {
             styled: StyledChapter::from_items(items),
@@ -1504,7 +1504,7 @@ fn element_ctx_from_start(
     max_inline_style_bytes: usize,
 ) -> Result<ElementCtx, RenderPrepError> {
     let tag = decode_tag_name(reader, e.name().as_ref())?;
-    let mut classes = Vec::new();
+    let mut classes = Vec::with_capacity(0);
     let mut inline_style = None;
     for attr in e.attributes().flatten() {
         let key = match reader.decoder().decode(attr.key.as_ref()) {
@@ -1706,7 +1706,7 @@ pub(crate) fn resolve_relative(base_path: &str, rel: &str) -> String {
 }
 
 fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
+    let mut parts: Vec<&str> = Vec::with_capacity(0);
     for part in path.split('/') {
         match part {
             "" | "." => {}
@@ -1724,10 +1724,10 @@ pub(crate) fn parse_stylesheet_links(chapter_href: &str, html: &str) -> Vec<Stri
 }
 
 pub(crate) fn parse_stylesheet_links_bytes(chapter_href: &str, html_bytes: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(0);
     let mut reader = Reader::from_reader(html_bytes);
     reader.config_mut().trim_text(true);
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(0);
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -1820,7 +1820,7 @@ fn extract_font_face_src(css_href: &str, src_value: &str) -> Option<String> {
 }
 
 pub(crate) fn parse_font_faces_from_css(css_href: &str, css: &str) -> Vec<EmbeddedFontFace> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(0);
     let lower = css.to_ascii_lowercase();
     let mut search_from = 0usize;
 
