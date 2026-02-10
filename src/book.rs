@@ -1261,7 +1261,8 @@ impl<R: Read + Seek> EpubBook<R> {
             .clone();
 
         // Check hard caps before reading
-        let uncompressed = entry.uncompressed_size as usize;
+        let uncompressed = usize::try_from(entry.uncompressed_size)
+            .map_err(|_| EpubError::Zip(ZipError::FileTooLarge))?;
 
         // Check ZIP limits
         if let Some(limits) = self.zip.limits() {
@@ -1638,7 +1639,7 @@ fn read_entry_into_with_limit<R: Read + Seek, W: Write>(
         )
     };
 
-    if uncompressed_size as usize > max_bytes || compressed_size as usize > max_bytes {
+    if uncompressed_size > max_bytes as u64 || compressed_size > max_bytes as u64 {
         return Err(EpubError::Zip(ZipError::FileTooLarge));
     }
     let entry = CdEntry {

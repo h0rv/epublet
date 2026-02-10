@@ -628,14 +628,16 @@ fn validate_encryption_references<F: Read + Seek>(
 
 fn read_entry<F: Read + Seek>(
     zip: &mut StreamingZip<F>,
-    local_header_offset: u32,
+    local_header_offset: u64,
 ) -> Result<Vec<u8>, crate::ZipError> {
     let entry = zip
         .entries()
         .find(|e| e.local_header_offset == local_header_offset)
         .ok_or(crate::ZipError::FileNotFound)?
         .clone();
-    let mut buf = vec![0u8; entry.uncompressed_size as usize];
+    let size =
+        usize::try_from(entry.uncompressed_size).map_err(|_| crate::ZipError::FileTooLarge)?;
+    let mut buf = vec![0u8; size];
     let n = zip.read_file_at_offset(local_header_offset, &mut buf)?;
     buf.truncate(n);
     Ok(buf)

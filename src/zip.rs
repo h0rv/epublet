@@ -63,6 +63,8 @@ const SIG_CD_ENTRY: u32 = 0x02014b50;
 
 /// End of central directory signature (little-endian)
 const SIG_EOCD: u32 = 0x06054b50;
+/// ZIP64 end of central directory record signature (little-endian)
+const SIG_ZIP64_EOCD: u32 = 0x06064b50;
 /// ZIP64 end of central directory locator signature (little-endian)
 const SIG_ZIP64_EOCD_LOCATOR: u32 = 0x07064b50;
 /// Minimum EOCD record size in bytes
@@ -80,9 +82,17 @@ pub use crate::error::ZipError;
 #[derive(Clone, Copy, Debug)]
 struct EocdInfo {
     cd_offset: u64,
-    cd_size: u32,
-    num_entries: u16,
-    uses_zip64: bool,
+    cd_size: u64,
+    num_entries: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Zip64EocdInfo {
+    disk_number: u32,
+    disk_with_cd_start: u32,
+    num_entries: u64,
+    cd_size: u64,
+    cd_offset: u64,
 }
 
 /// Central directory entry metadata
@@ -91,11 +101,11 @@ pub struct CdEntry {
     /// Compression method (0=stored, 8=deflated)
     pub method: u16,
     /// Compressed size in bytes
-    pub compressed_size: u32,
+    pub compressed_size: u64,
     /// Uncompressed size in bytes
-    pub uncompressed_size: u32,
+    pub uncompressed_size: u64,
     /// Offset to local file header
-    pub local_header_offset: u32,
+    pub local_header_offset: u64,
     /// CRC32 checksum
     pub crc32: u32,
     /// Filename (max 255 chars)
@@ -141,11 +151,8 @@ impl<F: Read + Seek> StreamingZip<F> {
             .map(|l| l.max_eocd_scan.min(MAX_EOCD_SCAN))
             .unwrap_or(MAX_EOCD_SCAN);
         let eocd = Self::find_eocd(&mut file, max_eocd_scan)?;
-        if eocd.uses_zip64 {
-            return Err(ZipError::UnsupportedZip64);
-        }
         let strict = limits.is_some_and(|l| l.strict);
-        if strict && eocd.num_entries as usize > MAX_CD_ENTRIES {
+        if strict && eocd.num_entries > MAX_CD_ENTRIES as u64 {
             return Err(ZipError::CentralDirFull);
         }
 
@@ -154,9 +161,13 @@ impl<F: Read + Seek> StreamingZip<F> {
         // Parse central directory entries
         file.seek(SeekFrom::Start(eocd.cd_offset))
             .map_err(|_| ZipError::IoError)?;
-        let cd_end = eocd.cd_offset + eocd.cd_size as u64;
+        let cd_end = eocd
+            .cd_offset
+            .checked_add(eocd.cd_size)
+            .ok_or(ZipError::InvalidFormat)?;
 
-        for _ in 0..eocd.num_entries.min(MAX_CD_ENTRIES as u16) {
+        let entries_to_scan = core::cmp::min(eocd.num_entries, MAX_CD_ENTRIES as u64);
+        for _ in 0..entries_to_scan {
             let pos = file.stream_position().map_err(|_| ZipError::IoError)?;
             if pos >= cd_end {
                 if strict {
@@ -173,7 +184,7 @@ impl<F: Read + Seek> StreamingZip<F> {
             }
         }
 
-        if eocd.num_entries as usize > MAX_CD_ENTRIES {
+        if eocd.num_entries > MAX_CD_ENTRIES as u64 {
             log::warn!(
                 "[ZIP] Archive has {} entries but only {} were loaded (max: {})",
                 eocd.num_entries,
@@ -191,7 +202,7 @@ impl<F: Read + Seek> StreamingZip<F> {
         Ok(Self {
             file,
             entries,
-            num_entries: eocd.num_entries as usize,
+            num_entries: core::cmp::min(eocd.num_entries, usize::MAX as u64) as usize,
             limits,
         })
     }
@@ -219,8 +230,8 @@ impl<F: Read + Seek> StreamingZip<F> {
             if Self::read_u32_le(&buffer, i) == SIG_EOCD {
                 // Found EOCD, extract info
                 let num_entries = Self::read_u16_le(&buffer, i + 8);
-                let cd_size = Self::read_u32_le(&buffer, i + 12);
-                let cd_offset = Self::read_u32_le(&buffer, i + 16) as u64;
+                let cd_size_32 = Self::read_u32_le(&buffer, i + 12);
+                let cd_offset_32 = Self::read_u32_le(&buffer, i + 16) as u64;
                 let comment_len = Self::read_u16_le(&buffer, i + 20) as u64;
                 let eocd_pos = scan_base + i as u64;
                 let eocd_end = eocd_pos + EOCD_MIN_SIZE as u64 + comment_len;
@@ -228,36 +239,121 @@ impl<F: Read + Seek> StreamingZip<F> {
                     continue;
                 }
 
-                let cd_end = cd_offset
-                    .checked_add(cd_size as u64)
+                let uses_zip64_sentinel = num_entries == u16::MAX
+                    || cd_size_32 == u32::MAX
+                    || cd_offset_32 == u32::MAX as u64;
+
+                let mut zip64_locator: Option<(u32, u64, u32)> = None;
+                if eocd_pos >= 20 {
+                    file.seek(SeekFrom::Start(eocd_pos - 20))
+                        .map_err(|_| ZipError::IoError)?;
+                    let mut locator = [0u8; 20];
+                    file.read_exact(&mut locator)
+                        .map_err(|_| ZipError::IoError)?;
+                    if u32::from_le_bytes([locator[0], locator[1], locator[2], locator[3]])
+                        == SIG_ZIP64_EOCD_LOCATOR
+                    {
+                        let zip64_disk =
+                            u32::from_le_bytes([locator[4], locator[5], locator[6], locator[7]]);
+                        let zip64_eocd_offset = u64::from_le_bytes([
+                            locator[8],
+                            locator[9],
+                            locator[10],
+                            locator[11],
+                            locator[12],
+                            locator[13],
+                            locator[14],
+                            locator[15],
+                        ]);
+                        let total_disks = u32::from_le_bytes([
+                            locator[16],
+                            locator[17],
+                            locator[18],
+                            locator[19],
+                        ]);
+                        zip64_locator = Some((zip64_disk, zip64_eocd_offset, total_disks));
+                    }
+                }
+
+                if uses_zip64_sentinel || zip64_locator.is_some() {
+                    let (zip64_disk, zip64_eocd_offset, total_disks) =
+                        zip64_locator.ok_or(ZipError::InvalidFormat)?;
+                    if zip64_disk != 0 || total_disks != 1 {
+                        return Err(ZipError::UnsupportedZip64);
+                    }
+                    let zip64 = Self::read_zip64_eocd(file, zip64_eocd_offset)?;
+                    if zip64.disk_number != 0 || zip64.disk_with_cd_start != 0 {
+                        return Err(ZipError::UnsupportedZip64);
+                    }
+                    let cd_end = zip64
+                        .cd_offset
+                        .checked_add(zip64.cd_size)
+                        .ok_or(ZipError::InvalidFormat)?;
+                    if cd_end > eocd_pos || cd_end > file_size {
+                        return Err(ZipError::InvalidFormat);
+                    }
+                    return Ok(EocdInfo {
+                        cd_offset: zip64.cd_offset,
+                        cd_size: zip64.cd_size,
+                        num_entries: zip64.num_entries,
+                    });
+                }
+
+                let cd_end = cd_offset_32
+                    .checked_add(cd_size_32 as u64)
                     .ok_or(ZipError::InvalidFormat)?;
                 if cd_end > eocd_pos || cd_end > file_size {
                     return Err(ZipError::InvalidFormat);
                 }
 
-                let uses_zip64_sentinel =
-                    num_entries == u16::MAX || cd_size == u32::MAX || cd_offset == u32::MAX as u64;
-                let uses_zip64_locator = if eocd_pos >= 20 {
-                    file.seek(SeekFrom::Start(eocd_pos - 20))
-                        .map_err(|_| ZipError::IoError)?;
-                    let mut locator_sig = [0u8; 4];
-                    file.read_exact(&mut locator_sig)
-                        .map_err(|_| ZipError::IoError)?;
-                    u32::from_le_bytes(locator_sig) == SIG_ZIP64_EOCD_LOCATOR
-                } else {
-                    false
-                };
-
                 return Ok(EocdInfo {
-                    cd_offset,
-                    cd_size,
-                    num_entries,
-                    uses_zip64: uses_zip64_sentinel || uses_zip64_locator,
+                    cd_offset: cd_offset_32,
+                    cd_size: cd_size_32 as u64,
+                    num_entries: num_entries as u64,
                 });
             }
         }
 
         Err(ZipError::InvalidFormat)
+    }
+
+    fn read_zip64_eocd(file: &mut F, offset: u64) -> Result<Zip64EocdInfo, ZipError> {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|_| ZipError::IoError)?;
+        let mut fixed = [0u8; 56];
+        file.read_exact(&mut fixed).map_err(|_| ZipError::IoError)?;
+
+        let sig = u32::from_le_bytes([fixed[0], fixed[1], fixed[2], fixed[3]]);
+        if sig != SIG_ZIP64_EOCD {
+            return Err(ZipError::InvalidFormat);
+        }
+
+        let record_size = u64::from_le_bytes([
+            fixed[4], fixed[5], fixed[6], fixed[7], fixed[8], fixed[9], fixed[10], fixed[11],
+        ]);
+        if record_size < 44 {
+            return Err(ZipError::InvalidFormat);
+        }
+
+        let disk_number = u32::from_le_bytes([fixed[16], fixed[17], fixed[18], fixed[19]]);
+        let disk_with_cd_start = u32::from_le_bytes([fixed[20], fixed[21], fixed[22], fixed[23]]);
+        let num_entries = u64::from_le_bytes([
+            fixed[32], fixed[33], fixed[34], fixed[35], fixed[36], fixed[37], fixed[38], fixed[39],
+        ]);
+        let cd_size = u64::from_le_bytes([
+            fixed[40], fixed[41], fixed[42], fixed[43], fixed[44], fixed[45], fixed[46], fixed[47],
+        ]);
+        let cd_offset = u64::from_le_bytes([
+            fixed[48], fixed[49], fixed[50], fixed[51], fixed[52], fixed[53], fixed[54], fixed[55],
+        ]);
+
+        Ok(Zip64EocdInfo {
+            disk_number,
+            disk_with_cd_start,
+            num_entries,
+            cd_size,
+            cd_offset,
+        })
     }
 
     /// Read a central directory entry from file
@@ -284,12 +380,15 @@ impl<F: Read + Seek> StreamingZip<F> {
         // buf[N] corresponds to CD entry offset (N + 4)
         entry.method = u16::from_le_bytes([buf[6], buf[7]]); // CD offset 10
         entry.crc32 = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]); // CD offset 16
-        entry.compressed_size = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]); // CD offset 20
-        entry.uncompressed_size = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]); // CD offset 24
+        let compressed_size_32 = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]); // CD offset 20
+        let uncompressed_size_32 = u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]); // CD offset 24
         let name_len = u16::from_le_bytes([buf[24], buf[25]]) as usize; // CD offset 28
         let extra_len = u16::from_le_bytes([buf[26], buf[27]]) as usize; // CD offset 30
         let comment_len = u16::from_le_bytes([buf[28], buf[29]]) as usize; // CD offset 32
-        entry.local_header_offset = u32::from_le_bytes([buf[38], buf[39], buf[40], buf[41]]); // CD offset 42
+        let local_header_offset_32 = u32::from_le_bytes([buf[38], buf[39], buf[40], buf[41]]); // CD offset 42
+        entry.compressed_size = compressed_size_32 as u64;
+        entry.uncompressed_size = uncompressed_size_32 as u64;
+        entry.local_header_offset = local_header_offset_32 as u64;
 
         // Read filename
         if name_len > 0 && name_len <= MAX_FILENAME_LEN {
@@ -303,10 +402,82 @@ impl<F: Read + Seek> StreamingZip<F> {
                 .map_err(|_| ZipError::IoError)?;
         }
 
-        // Skip extra field and comment
-        let skip_bytes = extra_len + comment_len;
-        if skip_bytes > 0 {
-            file.seek(SeekFrom::Current(skip_bytes as i64))
+        let needs_zip64_uncompressed = uncompressed_size_32 == u32::MAX;
+        let needs_zip64_compressed = compressed_size_32 == u32::MAX;
+        let needs_zip64_offset = local_header_offset_32 == u32::MAX;
+        let mut got_zip64_uncompressed = false;
+        let mut got_zip64_compressed = false;
+        let mut got_zip64_offset = false;
+
+        // Parse ZIP extra fields, specifically ZIP64 extended information (0x0001).
+        let mut extra_remaining = extra_len;
+        while extra_remaining >= 4 {
+            let mut hdr = [0u8; 4];
+            file.read_exact(&mut hdr).map_err(|_| ZipError::IoError)?;
+            let header_id = u16::from_le_bytes([hdr[0], hdr[1]]);
+            let field_size = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
+            extra_remaining -= 4;
+
+            if field_size > extra_remaining {
+                return Err(ZipError::InvalidFormat);
+            }
+
+            if header_id == 0x0001 {
+                let mut field_remaining = field_size;
+                if needs_zip64_uncompressed {
+                    if field_remaining < 8 {
+                        return Err(ZipError::InvalidFormat);
+                    }
+                    let mut val = [0u8; 8];
+                    file.read_exact(&mut val).map_err(|_| ZipError::IoError)?;
+                    entry.uncompressed_size = u64::from_le_bytes(val);
+                    got_zip64_uncompressed = true;
+                    field_remaining -= 8;
+                }
+                if needs_zip64_compressed {
+                    if field_remaining < 8 {
+                        return Err(ZipError::InvalidFormat);
+                    }
+                    let mut val = [0u8; 8];
+                    file.read_exact(&mut val).map_err(|_| ZipError::IoError)?;
+                    entry.compressed_size = u64::from_le_bytes(val);
+                    got_zip64_compressed = true;
+                    field_remaining -= 8;
+                }
+                if needs_zip64_offset {
+                    if field_remaining < 8 {
+                        return Err(ZipError::InvalidFormat);
+                    }
+                    let mut val = [0u8; 8];
+                    file.read_exact(&mut val).map_err(|_| ZipError::IoError)?;
+                    entry.local_header_offset = u64::from_le_bytes(val);
+                    got_zip64_offset = true;
+                    field_remaining -= 8;
+                }
+                if field_remaining > 0 {
+                    file.seek(SeekFrom::Current(field_remaining as i64))
+                        .map_err(|_| ZipError::IoError)?;
+                }
+            } else if field_size > 0 {
+                file.seek(SeekFrom::Current(field_size as i64))
+                    .map_err(|_| ZipError::IoError)?;
+            }
+            extra_remaining -= field_size;
+        }
+        if extra_remaining > 0 {
+            file.seek(SeekFrom::Current(extra_remaining as i64))
+                .map_err(|_| ZipError::IoError)?;
+        }
+
+        if (needs_zip64_uncompressed && !got_zip64_uncompressed)
+            || (needs_zip64_compressed && !got_zip64_compressed)
+            || (needs_zip64_offset && !got_zip64_offset)
+        {
+            return Err(ZipError::InvalidFormat);
+        }
+
+        if comment_len > 0 {
+            file.seek(SeekFrom::Current(comment_len as i64))
                 .map_err(|_| ZipError::IoError)?;
         }
 
@@ -363,14 +534,16 @@ impl<F: Read + Seek> StreamingZip<F> {
             return Err(ZipError::BufferTooSmall);
         }
         if let Some(limits) = self.limits {
-            if entry.uncompressed_size as usize > limits.max_file_read_size {
+            if entry.uncompressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
-            if entry.compressed_size as usize > limits.max_file_read_size {
+            if entry.compressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
         }
-        if entry.uncompressed_size as usize > buf.len() {
+        let uncompressed_size =
+            usize::try_from(entry.uncompressed_size).map_err(|_| ZipError::FileTooLarge)?;
+        if uncompressed_size > buf.len() {
             return Err(ZipError::BufferTooSmall);
         }
 
@@ -385,7 +558,8 @@ impl<F: Read + Seek> StreamingZip<F> {
         match entry.method {
             METHOD_STORED => {
                 // Read stored data directly
-                let size = entry.compressed_size as usize;
+                let size =
+                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 if size > buf.len() {
                     return Err(ZipError::BufferTooSmall);
                 }
@@ -405,7 +579,8 @@ impl<F: Read + Seek> StreamingZip<F> {
                 let mut state = alloc::boxed::Box::new(
                     miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
                 );
-                let mut compressed_remaining = entry.compressed_size as usize;
+                let mut compressed_remaining =
+                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
                 let mut written = 0usize;
 
@@ -423,16 +598,11 @@ impl<F: Read + Seek> StreamingZip<F> {
                         return Err(ZipError::BufferTooSmall);
                     }
 
-                    let flush = if compressed_remaining == 0 {
-                        MZFlush::Finish
-                    } else {
-                        MZFlush::None
-                    };
                     let result = miniz_oxide::inflate::stream::inflate(
                         &mut state,
                         pending,
                         &mut buf[written..],
-                        flush,
+                        MZFlush::None,
                     );
                     let consumed = result.bytes_consumed;
                     let produced = result.bytes_written;
@@ -500,10 +670,10 @@ impl<F: Read + Seek> StreamingZip<F> {
             return Err(ZipError::BufferTooSmall);
         }
         if let Some(limits) = self.limits {
-            if entry.uncompressed_size as usize > limits.max_file_read_size {
+            if entry.uncompressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
-            if entry.compressed_size as usize > limits.max_file_read_size {
+            if entry.compressed_size > limits.max_file_read_size as u64 {
                 return Err(ZipError::FileTooLarge);
             }
         }
@@ -515,7 +685,8 @@ impl<F: Read + Seek> StreamingZip<F> {
 
         match entry.method {
             METHOD_STORED => {
-                let mut remaining = entry.compressed_size as usize;
+                let mut remaining =
+                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut hasher = crc32fast::Hasher::new();
                 let mut written = 0usize;
 
@@ -541,7 +712,8 @@ impl<F: Read + Seek> StreamingZip<F> {
                 let mut state = alloc::boxed::Box::new(
                     miniz_oxide::inflate::stream::InflateState::new(DataFormat::Raw),
                 );
-                let mut compressed_remaining = entry.compressed_size as usize;
+                let mut compressed_remaining =
+                    usize::try_from(entry.compressed_size).map_err(|_| ZipError::FileTooLarge)?;
                 let mut pending = &[][..];
                 let mut written = 0usize;
                 let mut hasher = crc32fast::Hasher::new();
@@ -556,13 +728,11 @@ impl<F: Read + Seek> StreamingZip<F> {
                         compressed_remaining -= take;
                     }
 
-                    let flush = if compressed_remaining == 0 {
-                        MZFlush::Finish
-                    } else {
-                        MZFlush::None
-                    };
                     let result = miniz_oxide::inflate::stream::inflate(
-                        &mut state, pending, output_buf, flush,
+                        &mut state,
+                        pending,
+                        output_buf,
+                        MZFlush::None,
                     );
                     let consumed = result.bytes_consumed;
                     let produced = result.bytes_written;
@@ -606,7 +776,7 @@ impl<F: Read + Seek> StreamingZip<F> {
     /// This is useful when you need to read a file after getting its metadata
     pub fn read_file_at_offset(
         &mut self,
-        local_header_offset: u32,
+        local_header_offset: u64,
         buf: &mut [u8],
     ) -> Result<usize, ZipError> {
         // Find entry by offset
@@ -631,7 +801,7 @@ impl<F: Read + Seek> StreamingZip<F> {
 
     /// Calculate the offset to the actual file data (past local header)
     fn calc_data_offset(&mut self, entry: &CdEntry) -> Result<u64, ZipError> {
-        let offset = entry.local_header_offset as u64;
+        let offset = entry.local_header_offset;
         self.file
             .seek(SeekFrom::Start(offset))
             .map_err(|_| ZipError::IoError)?;
@@ -686,14 +856,15 @@ impl<F: Read + Seek> StreamingZip<F> {
             .clone();
 
         if let Some(limits) = self.limits {
-            if entry.uncompressed_size as usize > limits.max_mimetype_size {
+            if entry.uncompressed_size > limits.max_mimetype_size as u64 {
                 return Err(ZipError::InvalidMimetype(
                     "mimetype file too large".to_string(),
                 ));
             }
         }
 
-        let size = entry.uncompressed_size as usize;
+        let size = usize::try_from(entry.uncompressed_size)
+            .map_err(|_| ZipError::InvalidMimetype("mimetype file too large".to_string()))?;
         let mut buf = alloc::vec![0u8; size];
         let bytes_read = self.read_file(&entry, &mut buf)?;
 
@@ -875,6 +1046,91 @@ mod tests {
         zip
     }
 
+    fn build_single_file_zip64(filename: &str, content: &[u8]) -> Vec<u8> {
+        let name_bytes = filename.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let content_len = content.len() as u64;
+        let crc = crc32fast::hash(content);
+
+        let mut zip = Vec::with_capacity(0);
+
+        // -- Local file header --
+        let local_offset = zip.len() as u64;
+        zip.extend_from_slice(&SIG_LOCAL_FILE_HEADER.to_le_bytes()); // signature
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&METHOD_STORED.to_le_bytes()); // compression
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        zip.extend_from_slice(&crc.to_le_bytes()); // CRC32
+        zip.extend_from_slice(&(content_len as u32).to_le_bytes()); // compressed size
+        zip.extend_from_slice(&(content_len as u32).to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&name_len.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        zip.extend_from_slice(name_bytes); // filename
+        zip.extend_from_slice(content); // file data
+
+        // -- Central directory entry with ZIP64 extra field --
+        let cd_offset = zip.len() as u64;
+        let zip64_extra_len = 24u16; // uncompressed + compressed + local header offset
+        zip.extend_from_slice(&SIG_CD_ENTRY.to_le_bytes()); // signature
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version made by
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&METHOD_STORED.to_le_bytes()); // compression
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        zip.extend_from_slice(&crc.to_le_bytes()); // CRC32
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // compressed size sentinel
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // uncompressed size sentinel
+        zip.extend_from_slice(&name_len.to_le_bytes()); // filename length
+        zip.extend_from_slice(&(zip64_extra_len + 4).to_le_bytes()); // extra field length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+        zip.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        zip.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // local header offset sentinel
+        zip.extend_from_slice(name_bytes); // filename
+        zip.extend_from_slice(&0x0001u16.to_le_bytes()); // ZIP64 extra header id
+        zip.extend_from_slice(&zip64_extra_len.to_le_bytes()); // ZIP64 extra length
+        zip.extend_from_slice(&content_len.to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&content_len.to_le_bytes()); // compressed size
+        zip.extend_from_slice(&local_offset.to_le_bytes()); // local header offset
+
+        let cd_size = (zip.len() as u64) - cd_offset;
+
+        // -- ZIP64 EOCD record --
+        let zip64_eocd_offset = zip.len() as u64;
+        zip.extend_from_slice(&SIG_ZIP64_EOCD.to_le_bytes()); // signature
+        zip.extend_from_slice(&44u64.to_le_bytes()); // size of ZIP64 EOCD record
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version made by
+        zip.extend_from_slice(&45u16.to_le_bytes()); // version needed
+        zip.extend_from_slice(&0u32.to_le_bytes()); // disk number
+        zip.extend_from_slice(&0u32.to_le_bytes()); // disk where CD starts
+        zip.extend_from_slice(&1u64.to_le_bytes()); // entries on this disk
+        zip.extend_from_slice(&1u64.to_le_bytes()); // total entries
+        zip.extend_from_slice(&cd_size.to_le_bytes()); // central directory size
+        zip.extend_from_slice(&cd_offset.to_le_bytes()); // central directory offset
+
+        // -- ZIP64 EOCD locator --
+        zip.extend_from_slice(&SIG_ZIP64_EOCD_LOCATOR.to_le_bytes()); // signature
+        zip.extend_from_slice(&0u32.to_le_bytes()); // disk with ZIP64 EOCD
+        zip.extend_from_slice(&zip64_eocd_offset.to_le_bytes()); // ZIP64 EOCD offset
+        zip.extend_from_slice(&1u32.to_le_bytes()); // total disks
+
+        // -- Legacy EOCD with ZIP64 sentinels --
+        zip.extend_from_slice(&SIG_EOCD.to_le_bytes()); // signature
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk with CD
+        zip.extend_from_slice(&u16::MAX.to_le_bytes()); // entries on this disk sentinel
+        zip.extend_from_slice(&u16::MAX.to_le_bytes()); // total entries sentinel
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // CD size sentinel
+        zip.extend_from_slice(&u32::MAX.to_le_bytes()); // CD offset sentinel
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment length
+
+        zip
+    }
+
     fn add_zip_comment(mut zip: Vec<u8>, comment_len: usize) -> Vec<u8> {
         let eocd_pos = zip.len() - EOCD_MIN_SIZE;
         let comment_len = comment_len as u16;
@@ -915,13 +1171,30 @@ mod tests {
     }
 
     #[test]
-    fn test_zip64_sentinel_rejected() {
+    fn test_zip64_sentinel_without_locator_is_invalid() {
         let mut zip_data = build_single_file_zip("mimetype", b"application/epub+zip");
         let eocd_pos = zip_data.len() - EOCD_MIN_SIZE;
         zip_data[eocd_pos + 8..eocd_pos + 10].copy_from_slice(&u16::MAX.to_le_bytes());
         let cursor = std::io::Cursor::new(zip_data);
         let result = StreamingZip::new(cursor);
-        assert!(matches!(result, Err(ZipError::UnsupportedZip64)));
+        assert!(matches!(result, Err(ZipError::InvalidFormat)));
+    }
+
+    #[test]
+    fn test_zip64_single_file_archive_is_readable() {
+        let content = b"application/epub+zip";
+        let zip_data = build_single_file_zip64("mimetype", content);
+        let cursor = std::io::Cursor::new(zip_data);
+        let mut zip = StreamingZip::new(cursor).expect("ZIP64 archive should parse");
+        let entry = zip.get_entry("mimetype").expect("mimetype entry").clone();
+        assert_eq!(entry.uncompressed_size, content.len() as u64);
+        assert_eq!(entry.compressed_size, content.len() as u64);
+
+        let mut buf = [0u8; 64];
+        let n = zip
+            .read_file(&entry, &mut buf)
+            .expect("ZIP64 entry should read");
+        assert_eq!(&buf[..n], content);
     }
 
     #[test]
@@ -1002,7 +1275,7 @@ mod tests {
 
         let entry = zip.get_entry("mimetype").unwrap().clone();
         assert_eq!(entry.filename, "mimetype");
-        assert_eq!(entry.uncompressed_size, content.len() as u32);
+        assert_eq!(entry.uncompressed_size, content.len() as u64);
         assert_eq!(entry.method, METHOD_STORED);
 
         let mut buf = [0u8; 64];
