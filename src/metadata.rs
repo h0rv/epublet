@@ -139,6 +139,7 @@ impl EpubMetadata {
 /// Parse container.xml to find the OPF package file path
 ///
 /// Returns the full-path attribute from the rootfile element
+#[cfg(not(feature = "std"))]
 pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
@@ -154,8 +155,9 @@ pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
                     .decode(e.name().as_ref())
                     .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
                     .to_string();
+                let local = local_name(&name);
 
-                if name == "rootfile" {
+                if local == "rootfile" {
                     // Extract full-path attribute
                     for attr in e.attributes() {
                         let attr =
@@ -186,9 +188,70 @@ pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
     opf_path.ok_or_else(|| EpubError::InvalidEpub("No rootfile found in container.xml".into()))
 }
 
+#[cfg(feature = "std")]
+fn parse_container_xml_reader<R: std::io::BufRead>(reader: R) -> Result<String, EpubError> {
+    let mut reader = Reader::from_reader(reader);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::with_capacity(0);
+    let mut opf_path: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = reader
+                    .decoder()
+                    .decode(e.name().as_ref())
+                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                    .to_string();
+                let local = local_name(&name);
+
+                if local == "rootfile" {
+                    for attr in e.attributes() {
+                        let attr =
+                            attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+                        let key = reader
+                            .decoder()
+                            .decode(attr.key.as_ref())
+                            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+                        if key == "full-path" {
+                            let value = reader
+                                .decoder()
+                                .decode(&attr.value)
+                                .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                                .to_string();
+                            opf_path = Some(value);
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(EpubError::Parse(format!("XML parse error: {:?}", e))),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    opf_path.ok_or_else(|| EpubError::InvalidEpub("No rootfile found in container.xml".into()))
+}
+
+/// Parse container.xml to find the OPF package file path
+///
+/// Returns the full-path attribute from the rootfile element
+#[cfg(feature = "std")]
+pub fn parse_container_xml(content: &[u8]) -> Result<String, EpubError> {
+    parse_container_xml_reader(content)
+}
+
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
 /// Parse content.opf to extract metadata and manifest
 ///
 /// Uses SAX-style parsing with quick-xml
+#[cfg(not(feature = "std"))]
 pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
@@ -206,15 +269,16 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 let name = reader
                     .decoder()
                     .decode(e.name().as_ref())
                     .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
                     .to_string();
 
+                let local = local_name(&name);
                 // Track which section we're in
-                match name.as_str() {
+                match local {
                     "metadata" => in_metadata = true,
                     "manifest" => in_manifest = true,
                     "spine" => in_spine = true,
@@ -223,7 +287,7 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                 }
 
                 // Parse manifest item
-                if in_manifest && name == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
+                if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
                     if let Some(item) = parse_manifest_item(&e, &reader)? {
                         // Check if this is a cover image (EPUB3)
                         if item
@@ -239,10 +303,10 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
 
                 // Track metadata elements
                 if in_metadata {
-                    current_element = Some(name.clone());
+                    current_element = Some(local.to_string());
 
                     // Check for EPUB2 cover meta tag and EPUB3 meta properties
-                    if name == "meta" {
+                    if local == "meta" {
                         let mut name_attr = None;
                         let mut content_attr = None;
                         let mut property_attr = None;
@@ -280,14 +344,14 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                 }
 
                 // Parse guide reference (Start variant, in case it has children)
-                if in_guide && name == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
+                if in_guide && local == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
                     if let Some(guide_ref) = parse_guide_reference(&e, &reader)? {
                         metadata.guide.push(guide_ref);
                     }
                 }
 
                 // Track spine itemref
-                if in_spine && name == "itemref" {
+                if in_spine && local == "itemref" {
                     // Spine items are collected separately by spine.rs
                     // We just validate the structure here
                 }
@@ -317,33 +381,33 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
 
                     // Extract metadata fields (Dublin Core only)
                     match elem.as_str() {
-                        "title" | "dc:title" => {
+                        "title" => {
                             metadata.title = text;
                         }
-                        "creator" | "dc:creator" => {
+                        "creator" => {
                             metadata.author = text;
                         }
-                        "language" | "dc:language" => {
+                        "language" => {
                             metadata.language = text;
                         }
-                        "date" | "dc:date" => {
+                        "date" => {
                             metadata.date = Some(text);
                         }
-                        "publisher" | "dc:publisher" => {
+                        "publisher" => {
                             metadata.publisher = Some(text);
                         }
-                        "rights" | "dc:rights" => {
+                        "rights" => {
                             metadata.rights = Some(text);
                         }
-                        "description" | "dc:description" => {
+                        "description" => {
                             metadata.description = Some(text);
                         }
-                        "subject" | "dc:subject" => {
+                        "subject" => {
                             if metadata.subjects.len() < MAX_SUBJECTS {
                                 metadata.subjects.push(text);
                             }
                         }
-                        "identifier" | "dc:identifier" => {
+                        "identifier" => {
                             metadata.identifier = Some(text);
                         }
                         _ => {}
@@ -357,7 +421,7 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
                     .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
                     .to_string();
 
-                match name.as_str() {
+                match local_name(&name) {
                     "metadata" => in_metadata = false,
                     "manifest" => in_manifest = false,
                     "spine" => in_spine = false,
@@ -367,85 +431,6 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
 
                 current_element = None;
                 current_meta_property = None;
-            }
-            Ok(Event::Empty(e)) => {
-                let name = reader
-                    .decoder()
-                    .decode(e.name().as_ref())
-                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
-                    .to_string();
-
-                // Handle empty manifest items
-                if in_manifest && name == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
-                    if let Some(item) = parse_manifest_item(&e, &reader)? {
-                        if item
-                            .properties
-                            .as_ref()
-                            .is_some_and(|p| p.contains("cover-image"))
-                        {
-                            metadata.cover_id = Some(item.id.clone());
-                        }
-                        metadata.manifest.push(item);
-                    }
-                }
-
-                // Handle empty guide references
-                if in_guide && name == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
-                    if let Some(guide_ref) = parse_guide_reference(&e, &reader)? {
-                        metadata.guide.push(guide_ref);
-                    }
-                }
-
-                // Handle empty meta elements in metadata (EPUB2 cover + EPUB3 properties)
-                if in_metadata && name == "meta" {
-                    let mut name_attr = None;
-                    let mut content_attr = None;
-                    let mut property_attr = None;
-
-                    for attr in e.attributes() {
-                        let attr =
-                            attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
-                        let key = reader
-                            .decoder()
-                            .decode(attr.key.as_ref())
-                            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
-                        let value = reader
-                            .decoder()
-                            .decode(&attr.value)
-                            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
-
-                        if key == "name" && value == "cover" {
-                            name_attr = Some(value.to_string());
-                        }
-                        if key == "content" {
-                            content_attr = Some(value.to_string());
-                        }
-                        if key == "property" {
-                            property_attr = Some(value.to_string());
-                        }
-                    }
-
-                    if name_attr.is_some() {
-                        if let Some(ref content) = content_attr {
-                            metadata.cover_id = Some(content.clone());
-                        }
-                    }
-
-                    // Handle EPUB3 empty meta with property (unlikely but defensive)
-                    if let Some(ref prop) = property_attr {
-                        if let Some(ref content) = content_attr {
-                            match prop.as_str() {
-                                "dcterms:modified" => {
-                                    metadata.modified = Some(content.clone());
-                                }
-                                "rendition:layout" => {
-                                    metadata.rendition_layout = Some(content.clone());
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(EpubError::Parse(format!("XML parse error: {:?}", e))),
@@ -457,7 +442,167 @@ pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
     Ok(metadata)
 }
 
+#[cfg(feature = "std")]
+fn parse_opf_reader<R: std::io::BufRead>(reader: R) -> Result<EpubMetadata, EpubError> {
+    let mut reader = Reader::from_reader(reader);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::with_capacity(0);
+    let mut metadata = EpubMetadata::new();
+
+    let mut current_element: Option<String> = None;
+    let mut in_metadata = false;
+    let mut in_manifest = false;
+    let mut in_spine = false;
+    let mut in_guide = false;
+    let mut current_meta_property: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = reader
+                    .decoder()
+                    .decode(e.name().as_ref())
+                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                    .to_string();
+
+                let local = local_name(&name);
+                match local {
+                    "metadata" => in_metadata = true,
+                    "manifest" => in_manifest = true,
+                    "spine" => in_spine = true,
+                    "guide" => in_guide = true,
+                    _ => {}
+                }
+
+                if in_manifest && local == "item" && metadata.manifest.len() < MAX_MANIFEST_ITEMS {
+                    if let Some(item) = parse_manifest_item_reader(&e, &reader)? {
+                        if item
+                            .properties
+                            .as_ref()
+                            .is_some_and(|p| p.contains("cover-image"))
+                        {
+                            metadata.cover_id = Some(item.id.clone());
+                        }
+                        metadata.manifest.push(item);
+                    }
+                }
+
+                if in_metadata {
+                    current_element = Some(local.to_string());
+
+                    if local == "meta" {
+                        let mut name_attr = None;
+                        let mut content_attr = None;
+                        let mut property_attr = None;
+
+                        for attr in e.attributes() {
+                            let attr =
+                                attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+                            let key = reader
+                                .decoder()
+                                .decode(attr.key.as_ref())
+                                .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+                            let value = reader
+                                .decoder()
+                                .decode(&attr.value)
+                                .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+
+                            if key == "name" && value == "cover" {
+                                name_attr = Some(value.to_string());
+                            }
+                            if key == "content" {
+                                content_attr = Some(value.to_string());
+                            }
+                            if key == "property" {
+                                property_attr = Some(value.to_string());
+                            }
+                        }
+
+                        if name_attr.is_some() && content_attr.is_some() {
+                            metadata.cover_id = content_attr;
+                        }
+
+                        current_meta_property = property_attr;
+                    }
+                }
+
+                if in_guide && local == "reference" && metadata.guide.len() < MAX_GUIDE_REFS {
+                    if let Some(guide_ref) = parse_guide_reference_reader(&e, &reader)? {
+                        metadata.guide.push(guide_ref);
+                    }
+                }
+
+                if in_spine && local == "itemref" {}
+            }
+            Ok(Event::Text(e)) => {
+                if let Some(ref elem) = current_element {
+                    let text = reader
+                        .decoder()
+                        .decode(&e)
+                        .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                        .to_string();
+
+                    match elem.as_str() {
+                        "title" => metadata.title = text,
+                        "creator" => metadata.author = text,
+                        "language" => metadata.language = text,
+                        "date" => metadata.date = Some(text),
+                        "publisher" => metadata.publisher = Some(text),
+                        "rights" => metadata.rights = Some(text),
+                        "description" => metadata.description = Some(text),
+                        "subject" => {
+                            if metadata.subjects.len() < MAX_SUBJECTS {
+                                metadata.subjects.push(text);
+                            }
+                        }
+                        "identifier" => metadata.identifier = Some(text),
+                        "meta" => {
+                            if let Some(property) = current_meta_property.take() {
+                                if property == "dcterms:modified" {
+                                    metadata.modified = Some(text);
+                                } else if property == "rendition:layout" {
+                                    metadata.rendition_layout = Some(text);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = reader
+                    .decoder()
+                    .decode(e.name().as_ref())
+                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                    .into_owned();
+                match local_name(&name) {
+                    "metadata" => in_metadata = false,
+                    "manifest" => in_manifest = false,
+                    "spine" => in_spine = false,
+                    "guide" => in_guide = false,
+                    _ => {}
+                }
+                current_element = None;
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(EpubError::Parse(format!("XML parse error: {:?}", e))),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(metadata)
+}
+
+#[cfg(feature = "std")]
+/// Parse content.opf to extract metadata and manifest.
+pub fn parse_opf(content: &[u8]) -> Result<EpubMetadata, EpubError> {
+    parse_opf_reader(content)
+}
+
 /// Parse a manifest item from XML element attributes
+#[cfg(not(feature = "std"))]
 fn parse_manifest_item<'a>(
     e: &quick_xml::events::BytesStart<'a>,
     reader: &Reader<&[u8]>,
@@ -501,6 +646,7 @@ fn parse_manifest_item<'a>(
 }
 
 /// Parse a guide reference from XML element attributes
+#[cfg(not(feature = "std"))]
 fn parse_guide_reference<'a>(
     e: &quick_xml::events::BytesStart<'a>,
     reader: &Reader<&[u8]>,
@@ -540,6 +686,89 @@ fn parse_guide_reference<'a>(
     }
 }
 
+#[cfg(feature = "std")]
+fn parse_manifest_item_reader<'a, R: std::io::BufRead>(
+    e: &quick_xml::events::BytesStart<'a>,
+    reader: &Reader<R>,
+) -> Result<Option<ManifestItem>, EpubError> {
+    let mut id = None;
+    let mut href = None;
+    let mut media_type = None;
+    let mut properties = None;
+
+    for attr in e.attributes() {
+        let attr = attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+        let key = reader
+            .decoder()
+            .decode(attr.key.as_ref())
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = reader
+            .decoder()
+            .decode(&attr.value)
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+            .to_string();
+
+        match key.as_ref() {
+            "id" => id = Some(value),
+            "href" => href = Some(value),
+            "media-type" => media_type = Some(value),
+            "properties" => properties = Some(value),
+            _ => {}
+        }
+    }
+
+    if let (Some(id), Some(href), Some(media_type)) = (id, href, media_type) {
+        Ok(Some(ManifestItem {
+            id,
+            href,
+            media_type,
+            properties,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(feature = "std")]
+fn parse_guide_reference_reader<'a, R: std::io::BufRead>(
+    e: &quick_xml::events::BytesStart<'a>,
+    reader: &Reader<R>,
+) -> Result<Option<GuideRef>, EpubError> {
+    let mut guide_type = None;
+    let mut title = None;
+    let mut href = None;
+
+    for attr in e.attributes() {
+        let attr = attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+        let key = reader
+            .decoder()
+            .decode(attr.key.as_ref())
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = reader
+            .decoder()
+            .decode(&attr.value)
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+            .to_string();
+
+        match key.as_ref() {
+            "type" => guide_type = Some(value),
+            "title" => title = Some(value),
+            "href" => href = Some(value),
+            _ => {}
+        }
+    }
+
+    if let (Some(guide_type), Some(href)) = (guide_type, href) {
+        Ok(Some(GuideRef {
+            guide_type,
+            title,
+            href,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Full EPUB metadata extraction from both container.xml and content.opf
 ///
 /// This is a convenience function that takes both file contents and returns
@@ -563,41 +792,21 @@ pub fn extract_metadata(
 }
 
 /// Parse container.xml from a file path (SD card backed)
-///
-/// Memory-efficient alternative that reads and parses from file
-/// instead of loading entire content into RAM.
 #[cfg(feature = "std")]
 pub fn parse_container_xml_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, EpubError> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|e| EpubError::Io(format!("Failed to open container.xml: {}", e)))?;
-
-    // Read in chunks to avoid large allocations
-    let mut buf = Vec::with_capacity(4096);
-    file.read_to_end(&mut buf)
-        .map_err(|e| EpubError::Io(format!("Failed to read container.xml: {}", e)))?;
-
-    parse_container_xml(&buf)
+    let reader = std::io::BufReader::new(file);
+    parse_container_xml_reader(reader)
 }
 
 /// Parse content.opf from a file path (SD card backed)
-///
-/// Memory-efficient alternative that reads and parses from file
-/// instead of loading entire content into RAM.
 #[cfg(feature = "std")]
 pub fn parse_opf_file<P: AsRef<std::path::Path>>(path: P) -> Result<EpubMetadata, EpubError> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
-
-    // Read in chunks to avoid large allocations
-    let mut buf = Vec::with_capacity(16384);
-    file.read_to_end(&mut buf)
-        .map_err(|e| EpubError::Io(format!("Failed to read OPF: {}", e)))?;
-
-    parse_opf(&buf)
+    let reader = std::io::BufReader::new(file);
+    parse_opf_reader(reader)
 }
 
 /// Full EPUB metadata extraction using file-based parsing

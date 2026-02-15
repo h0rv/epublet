@@ -695,6 +695,7 @@ impl EpubBook<File> {
     ///     config
     /// ).unwrap();
     /// ```
+    #[cfg(feature = "std")]
     pub fn open_with_temp_storage<EP: AsRef<Path>, TP: AsRef<Path>>(
         epub_path: EP,
         temp_dir: TP,
@@ -732,7 +733,7 @@ impl EpubBook<File> {
         // Get OPF entry info first (before we borrow zip mutably again)
         let opf_entry = zip
             .get_entry(&opf_path)
-            .ok_or_else(|| EpubError::Zip(ZipError::FileNotFound))?;
+            .ok_or(EpubError::Zip(ZipError::FileNotFound))?;
 
         // Clone entry data we need (avoids borrow issues)
         let opf_entry_data = CdEntry {
@@ -748,7 +749,7 @@ impl EpubBook<File> {
         let mut opf_file = File::create(&opf_temp)
             .map_err(|e| EpubError::Io(format!("Failed to create temp file: {}", e)))?;
         zip.read_file_to_writer(&opf_entry_data, &mut opf_file)
-            .map_err(|e| EpubError::Zip(e))?;
+            .map_err(EpubError::Zip)?;
         drop(opf_file);
 
         // Parse OPF from file
@@ -758,14 +759,11 @@ impl EpubBook<File> {
         // Store the OPF path in metadata
         metadata.opf_path = Some(opf_path.clone());
 
+        // Parse spine from file to avoid full OPF buffering
+        let spine = crate::spine::parse_spine_file(&opf_temp)?;
+
         // Clean up OPF temp file
         let _ = std::fs::remove_file(&opf_temp);
-
-        // Parse spine from a small OPF buffer (spine is typically small)
-        let mut opf_buf = Vec::with_capacity(4096);
-        zip.read_file(&opf_entry_data, &mut opf_buf)
-            .map_err(|e| EpubError::Zip(e))?;
-        let spine = crate::spine::parse_spine(&opf_buf)?;
 
         validate_open_invariants(&metadata, &spine, options.validation_mode)?;
 

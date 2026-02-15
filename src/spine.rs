@@ -189,6 +189,7 @@ impl Spine {
 /// Parse spine from OPF content
 ///
 /// Extracts the ordered list of itemrefs from the spine element.
+#[cfg(not(feature = "std"))]
 pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
     let mut reader = Reader::from_reader(content);
     reader.config_mut().trim_text(true);
@@ -257,10 +258,137 @@ pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
     Ok(spine)
 }
 
+#[cfg(feature = "std")]
+fn parse_spine_reader<R: std::io::BufRead>(reader: R) -> Result<Spine, EpubError> {
+    let mut reader = Reader::from_reader(reader);
+    reader.config_mut().trim_text(true);
+
+    let mut buf = Vec::with_capacity(0);
+    let mut spine = Spine::new();
+    let mut in_spine = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let name = reader
+                    .decoder()
+                    .decode(e.name().as_ref())
+                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                    .to_string();
+
+                if name == "spine" {
+                    in_spine = true;
+
+                    for attr in e.attributes() {
+                        let attr =
+                            attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+                        let key = reader
+                            .decoder()
+                            .decode(attr.key.as_ref())
+                            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+                        if key == "toc" {
+                            let value = reader
+                                .decoder()
+                                .decode(&attr.value)
+                                .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                                .to_string();
+                            if !value.is_empty() {
+                                spine.toc_id = Some(value);
+                            }
+                        }
+                    }
+                }
+
+                if in_spine && name == "itemref" && spine.items.len() < MAX_SPINE_ITEMS {
+                    if let Some(item) = parse_spine_item_reader(&e, &reader)? {
+                        spine.items.push(item);
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = reader
+                    .decoder()
+                    .decode(e.name().as_ref())
+                    .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+                    .to_string();
+
+                if name == "spine" {
+                    in_spine = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(EpubError::Parse(format!("XML parse error: {:?}", e))),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(spine)
+}
+
+#[cfg(feature = "std")]
+/// Parse spine from OPF content.
+pub fn parse_spine(content: &[u8]) -> Result<Spine, EpubError> {
+    parse_spine_reader(content)
+}
+
+#[cfg(feature = "std")]
+/// Parse spine from a file-backed OPF stream.
+pub fn parse_spine_file<P: AsRef<std::path::Path>>(path: P) -> Result<Spine, EpubError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| EpubError::Io(format!("Failed to open OPF: {}", e)))?;
+    let reader = std::io::BufReader::new(file);
+    parse_spine_reader(reader)
+}
+
 /// Parse a spine itemref from XML element attributes
+#[cfg(not(feature = "std"))]
 fn parse_spine_item<'a>(
     e: &quick_xml::events::BytesStart<'a>,
     reader: &Reader<&[u8]>,
+) -> Result<Option<SpineItem>, EpubError> {
+    let mut idref = None;
+    let mut id = None;
+    let mut linear = true;
+    let mut properties = None;
+
+    for attr in e.attributes() {
+        let attr = attr.map_err(|e| EpubError::Parse(format!("Attr error: {:?}", e)))?;
+        let key = reader
+            .decoder()
+            .decode(attr.key.as_ref())
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?;
+        let value = reader
+            .decoder()
+            .decode(&attr.value)
+            .map_err(|e| EpubError::Parse(format!("Decode error: {:?}", e)))?
+            .to_string();
+
+        match key.as_ref() {
+            "idref" => idref = Some(value),
+            "id" => id = Some(value),
+            "linear" => linear = value != "no",
+            "properties" => properties = Some(value),
+            _ => {}
+        }
+    }
+
+    idref
+        .map(|idref| {
+            Ok(SpineItem {
+                idref,
+                id,
+                linear,
+                properties,
+            })
+        })
+        .transpose()
+}
+
+#[cfg(feature = "std")]
+fn parse_spine_item_reader<'a, R: std::io::BufRead>(
+    e: &quick_xml::events::BytesStart<'a>,
+    reader: &Reader<R>,
 ) -> Result<Option<SpineItem>, EpubError> {
     let mut idref = None;
     let mut id = None;
