@@ -12,6 +12,11 @@ use log;
 use miniz_oxide::{DataFormat, MZFlush, MZStatus};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+#[cfg(target_os = "espidf")]
+const DEFAULT_ZIP_SCRATCH_BYTES: usize = 2 * 1024;
+#[cfg(not(target_os = "espidf"))]
+const DEFAULT_ZIP_SCRATCH_BYTES: usize = 8 * 1024;
+
 /// Maximum number of central directory entries to cache
 const MAX_CD_ENTRIES: usize = 256;
 
@@ -516,7 +521,7 @@ impl<F: Read + Seek> StreamingZip<F> {
     /// Read and decompress a file into the provided buffer
     /// Returns number of bytes written to buffer
     pub fn read_file(&mut self, entry: &CdEntry, buf: &mut [u8]) -> Result<usize, ZipError> {
-        let mut input_buf = alloc::vec![0u8; 8 * 1024];
+        let mut input_buf = alloc::vec![0u8; DEFAULT_ZIP_SCRATCH_BYTES];
         self.read_file_with_scratch(entry, buf, &mut input_buf)
     }
 
@@ -647,8 +652,8 @@ impl<F: Read + Seek> StreamingZip<F> {
         entry: &CdEntry,
         writer: &mut W,
     ) -> Result<usize, ZipError> {
-        let mut input_buf = alloc::vec![0u8; 8 * 1024];
-        let mut output_buf = alloc::vec![0u8; 8 * 1024];
+        let mut input_buf = alloc::vec![0u8; DEFAULT_ZIP_SCRATCH_BYTES];
+        let mut output_buf = alloc::vec![0u8; DEFAULT_ZIP_SCRATCH_BYTES];
         self.read_file_to_writer_with_scratch(entry, writer, &mut input_buf, &mut output_buf)
     }
 
